@@ -482,7 +482,9 @@ __build__() {
 
     __build_cache() {
     mkdir -p "$cache_dir" 2>/dev/null
-    local tmpl_hash="" hash_dirs=("$_WIKI_DIR/wiki" "$_WIKI_DIR/mods" "$_WIKI_DIR/bin")
+    local entry_file="$_WIKI_DIR/init"
+    [[ ! -f "$entry_file" && -f "$_WIKI_DIR/wiki" ]] && entry_file="$_WIKI_DIR/wiki"
+    local tmpl_hash="" hash_dirs=("$entry_file" "$_WIKI_DIR/mods" "$_WIKI_DIR/bin")
     [[ -d "$TEMPLATEDIR" ]] && hash_dirs+=("$TEMPLATEDIR")
     tmpl_hash=$(find "${hash_dirs[@]}" -type f -printf "%Ts_%s_%p\n" | LC_ALL=C sort | cksum)
     tmpl_hash="${tmpl_hash%% *}_${tmpl_hash#* }"
