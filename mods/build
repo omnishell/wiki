@@ -1,0 +1,1229 @@
+#! /bin/bash
+
+__build__() {
+    
+    __build_init() {
+        local -A CACHED_META=()
+        local meta_cache_valid=0
+        if [[ -f "$meta_cache_file" && $force_rebuild -eq 0 ]]; then
+            local rec_type rest
+            while IFS=$'\x1F' read -r rec_type rest || [[ -n "$rec_type" ]]; do
+                if [[ "$rec_type" == "PAGE" ]]; then
+                    local c_file="${rest#*$'\x1F'*$'\x1F'}"
+                    c_file="${c_file%%$'\x1F'*}"
+                    [[ -n "$c_file" ]] && CACHED_META["$c_file"]="$rest"
+                elif [[ "$rec_type" == "DIRW" ]]; then
+                    local d_slug="${rest%%$'\x1F'*}" d_w="${rest#*$'\x1F'}"
+                    [[ "$d_w" == "$rest" ]] && d_w=""
+                    [[ -n "$d_slug" ]] && PAGE_WEIGHTS["$d_slug"]="$d_w"
+                fi
+            done < "$meta_cache_file"
+            meta_cache_valid=1
+        fi
+        local -A FOUND_FILES=()
+        local dirty_count=0
+        local -A PAGE_IMPLICIT_WEIGHTS=()
+        local -a dirty_files=()
+        local -A dirty_file_to_slug=()
+        local -A initial_tmpls=()
+        if [[ -z "${WIKI_PAGES[$w_name]:-}" ]]; then
+            local mtime size file
+            while IFS=$'\t' read -r -d '' mtime size file; do
+                [[ -z "$file" ]] && continue
+                FOUND_FILES["$file"]=1
+                local rel_path="${file#$SOURCEDIR}"
+                rel_path="${rel_path#/}"
+                local no_ext="${rel_path%.*}"
+                local prev_IFS="$IFS"
+                IFS='/'
+                local -a path_parts=($no_ext)
+                IFS="$prev_IFS"
+                local clean_slug="" implicit_weight="" i part part_weight
+                for ((i=0; i<${#path_parts[@]}; i++)); do
+                    part="${path_parts[$i]}"
+                    part_weight=""
+                    if [[ "$part" =~ ^([0-9]+)\.(.+)$ ]]; then
+                        part_weight="${BASH_REMATCH[1]}"
+                        part="${BASH_REMATCH[2]}"
+                    elif [[ "$part" =~ ^([0-9]+)$ ]]; then
+                        part_weight="${BASH_REMATCH[1]}"
+                    fi
+                    if [[ -z "$clean_slug" ]]; then
+                        clean_slug="$part"
+                    else
+                        clean_slug="${clean_slug}.${part}"
+                    fi
+                    if (( i == ${#path_parts[@]} - 1 )); then
+                        implicit_weight="$part_weight"
+                    else
+                        if [[ -n "$part_weight" && -z "${PAGE_WEIGHTS[$clean_slug]:-}" ]]; then
+                            PAGE_WEIGHTS["$clean_slug"]="$part_weight"
+                        fi
+                    fi
+                done
+                _pages+=("$clean_slug")
+                PAGE_FILES["$clean_slug"]="$file"
+                PAGE_MTIME_SIZE["$file"]="${mtime}_${size}"
+                PAGE_IMPLICIT_WEIGHTS["$clean_slug"]="$implicit_weight"
+                local var_str="path:${file}"
+                [[ -n "$implicit_weight" ]] && var_str+=",implicit_weight:${implicit_weight}"
+                WIKI_PAGE_VARS["${w_name}::${clean_slug}"]="$var_str"
+                local is_dirty=1
+                local cached_entry="${CACHED_META["$file"]:-}"
+                if [[ -n "$cached_entry" ]]; then
+                    local c_mtime="${cached_entry%%$'\x1F'*}"
+                    local after_mtime="${cached_entry#*$'\x1F'}"
+                    local c_size="${after_mtime%%$'\x1F'*}"
+                    if [[ "$c_mtime" == "$mtime" && "$c_size" == "$size" ]]; then
+                        local _m _s _f c_slug c_iw c_title c_w c_tmpl c_tag c_thumb c_rel c_btypes c_bkeys
+                        IFS=$'\x1F' read -r _m _s _f c_slug c_iw c_title c_w c_tmpl c_tag c_thumb c_rel c_btypes c_bkeys <<< "$cached_entry"
+                        PAGE_TITLES["$clean_slug"]="$c_title"
+                        PAGE_WEIGHTS["$clean_slug"]="$c_w"
+                        [[ -n "$c_tmpl" ]] && PAGE_TEMPLATES["$clean_slug"]="$c_tmpl"
+                        [[ -n "$c_tag" ]] && PAGE_TAGS["$clean_slug"]="$c_tag"
+                        [[ -n "$c_thumb" ]] && PAGE_THUMBS["$clean_slug"]="$c_thumb"
+                        [[ -n "$c_rel" ]] && PAGE_RELATED["$clean_slug"]="$c_rel"
+                        if [[ -n "$c_btypes" ]]; then
+                            local bt; local IFS_s="$IFS"; IFS=','
+                            for bt in $c_btypes; do SEARCH_BLOCK_TYPES["$bt"]=1; done
+                            IFS="$IFS_s"
+                        fi
+                        if [[ -n "$c_bkeys" ]]; then
+                            local bk b_k b_v; local IFS_s="$IFS"; IFS=','
+                            for bk in $c_bkeys; do
+                                b_k="${bk%%=*}"; b_v="${bk#*=}"
+                                [[ -z "${BLOCK_TITLE_KEYS[$b_k]:-}" ]] && BLOCK_TITLE_KEYS["$b_k"]="$b_v"
+                            done
+                            IFS="$IFS_s"
+                        fi
+                        local out_path="$BUILDDIR/${clean_slug//./\/}.html"
+                        if [[ -f "$out_path" && ( -n "${CACHE_HASHES["$file"]:-}" || -f "$cache_dir/${clean_slug}_index_page.json" ) ]]; then
+                            is_dirty=0
+                        fi
+                    fi
+                fi
+                if (( is_dirty == 1 )); then
+                    DIRTY_PAGES["$clean_slug"]=1
+                    (( dirty_count++ ))
+                    dirty_files+=("$file")
+                    dirty_file_to_slug["$file"]="$clean_slug"
+                else
+                    DIRTY_PAGES["$clean_slug"]=0
+                fi
+                if [[ "$clean_slug" == *.* ]]; then
+                    _nested_pages+=("$clean_slug")
+                else
+                    _global_pages+=("$clean_slug")
+                fi
+            done < <(find "$SOURCEDIR" -type f -name "*.wiki" -printf "%Ts\t%s\t%p\0")
+        else
+            local OIFS="$IFS"; IFS=','
+            local p
+            for p in ${WIKI_PAGES[$w_name]}; do _pages+=("$p"); done
+            IFS="$OIFS"
+            local -a stat_targets=()
+            for p in "${_pages[@]}"; do
+                local p_vars="${WIKI_PAGE_VARS[${w_name}::${p}]:-}"
+                local file="" implicit_weight="" initial_tmpl=""
+                local OIFS="$IFS"; IFS=','
+                for pair in $p_vars; do
+                    local k="${pair%%:*}" v="${pair#*:}"
+                    [[ "$k" == "path" ]] && file="$v"
+                    [[ "$k" == "implicit_weight" ]] && implicit_weight="$v"
+                    [[ "$k" == "template" ]] && initial_tmpl="$v"
+                done
+                IFS="$OIFS"
+                [[ -z "$file" ]] && file="${p_vars##*path:}" && file="${file%%,*}"
+                PAGE_FILES["$p"]="$file"
+                FOUND_FILES["$file"]=1
+                PAGE_IMPLICIT_WEIGHTS["$p"]="$implicit_weight"
+                [[ -n "$initial_tmpl" ]] && initial_tmpls["$p"]="$initial_tmpl"
+                [[ -f "$file" ]] && stat_targets+=("$file")
+            done
+            if (( ${#stat_targets[@]} > 0 )); then
+                local sm ss sf
+                while read -r sm ss sf; do
+                    PAGE_MTIME_SIZE["$sf"]="${sm}_${ss}"
+                done < <(stat -c "%Y %s %n" "${stat_targets[@]}" 2>/dev/null)
+            fi
+            for p in "${_pages[@]}"; do
+                local file="${PAGE_FILES["$p"]}"
+                local ms="${PAGE_MTIME_SIZE["$file"]:-0_0}"
+                local mtime="${ms%%_*}" size="${ms#*_}"
+                local is_dirty=1
+                local cached_entry="${CACHED_META["$file"]:-}"
+                if [[ -n "$cached_entry" ]]; then
+                    local c_mtime="${cached_entry%%$'\x1F'*}"
+                    local after_mtime="${cached_entry#*$'\x1F'}"
+                    local c_size="${after_mtime%%$'\x1F'*}"
+                    if [[ "$c_mtime" == "$mtime" && "$c_size" == "$size" ]]; then
+                        local _m _s _f c_slug c_iw c_title c_w c_tmpl c_tag c_thumb c_rel c_btypes c_bkeys
+                        IFS=$'\x1F' read -r _m _s _f c_slug c_iw c_title c_w c_tmpl c_tag c_thumb c_rel c_btypes c_bkeys <<< "$cached_entry"
+                        PAGE_TITLES["$p"]="$c_title"
+                        PAGE_WEIGHTS["$p"]="$c_w"
+                        [[ -n "$c_tmpl" ]] && PAGE_TEMPLATES["$p"]="$c_tmpl"
+                        [[ -n "$c_tag" ]] && PAGE_TAGS["$p"]="$c_tag"
+                        [[ -n "$c_thumb" ]] && PAGE_THUMBS["$p"]="$c_thumb"
+                        [[ -n "$c_rel" ]] && PAGE_RELATED["$p"]="$c_rel"
+                        if [[ -n "$c_btypes" ]]; then
+                            local bt; local IFS_s="$IFS"; IFS=','
+                            for bt in $c_btypes; do SEARCH_BLOCK_TYPES["$bt"]=1; done
+                            IFS="$IFS_s"
+                        fi
+                        if [[ -n "$c_bkeys" ]]; then
+                            local bk b_k b_v; local IFS_s="$IFS"; IFS=','
+                            for bk in $c_bkeys; do
+                                b_k="${bk%%=*}"; b_v="${bk#*=}"
+                                [[ -z "${BLOCK_TITLE_KEYS[$b_k]:-}" ]] && BLOCK_TITLE_KEYS["$b_k"]="$b_v"
+                            done
+                            IFS="$IFS_s"
+                        fi
+                        local out_path="$BUILDDIR/${p//./\/}.html"
+                        if [[ -f "$out_path" && ( -n "${CACHE_HASHES["$file"]:-}" || -f "$cache_dir/${p}_index_page.json" ) ]]; then
+                            is_dirty=0
+                        fi
+                    fi
+                fi
+                if (( is_dirty == 1 )); then
+                    DIRTY_PAGES["$p"]=1
+                    (( dirty_count++ ))
+                    if [[ -f "$file" ]]; then
+                        dirty_files+=("$file")
+                        dirty_file_to_slug["$file"]="$p"
+                    else
+                        [[ -n "${initial_tmpls[$p]:-}" ]] && PAGE_TEMPLATES["$p"]="${initial_tmpls[$p]}"
+                        local implicit_weight="${PAGE_IMPLICIT_WEIGHTS[$p]:-}"
+                        local fm_weight="${implicit_weight:-9999999}"
+                        PAGE_TITLES["$p"]=""
+                        if [[ -z "${PAGE_WEIGHTS[$p]:-}" || "$fm_weight" != "9999999" ]]; then
+                            PAGE_WEIGHTS["$p"]="$fm_weight"
+                        fi
+                    fi
+                else
+                    DIRTY_PAGES["$p"]=0
+                fi
+                if [[ "$p" == *.* ]]; then _nested_pages+=("$p")
+                else _global_pages+=("$p"); fi
+            done
+        fi
+        if (( ${#dirty_files[@]} > 0 )); then
+            SEARCH_BLOCK_TYPES["page"]=1
+            local d_file d_title d_weight d_tmpl d_tags d_thumb d_rel d_btypes d_bkeys
+            while IFS=$'\x1F' read -r d_file d_title d_weight d_tmpl d_tags d_thumb d_rel d_btypes d_bkeys; do
+                [[ -z "$d_file" ]] && continue
+                local clean_slug="${dirty_file_to_slug["$d_file"]}"
+                local implicit_weight="${PAGE_IMPLICIT_WEIGHTS["$clean_slug"]:-}"
+                local init_t="${initial_tmpls["$clean_slug"]:-}"
+                local tmpl_val="${d_tmpl:-$init_t}"
+                [[ -n "$tmpl_val" ]] && PAGE_TEMPLATES["$clean_slug"]="$tmpl_val"
+                if [[ -n "$d_tags" ]]; then
+                    PAGE_TAGS["$clean_slug"]="$d_tags"
+                    SEARCH_BLOCK_TYPES["tag"]=1
+                fi
+                [[ -n "$d_thumb" ]] && PAGE_THUMBS["$clean_slug"]="$d_thumb"
+                [[ -n "$d_rel" ]] && PAGE_RELATED["$clean_slug"]="$d_rel"
+                local fm_weight="$d_weight"
+                if [[ -z "$fm_weight" && -n "$implicit_weight" ]]; then
+                    fm_weight="$implicit_weight"
+                elif [[ -z "$fm_weight" ]]; then
+                    local fname="${d_file##*/}"
+                    if [[ "$fname" =~ ^([0-9]+)\.(.+)\.wiki$ ]]; then
+                        fm_weight="${BASH_REMATCH[1]}"
+                    elif [[ "$fname" =~ ^([0-9]+)\.wiki$ ]]; then
+                        fm_weight="${BASH_REMATCH[1]}"
+                    else
+                        fm_weight="9999999"
+                    fi
+                elif [[ "$fm_weight" == -* || -n "${fm_weight//[0-9]/}" ]]; then
+                    fm_weight="9999999"
+                fi
+                PAGE_TITLES["$clean_slug"]="$d_title"
+                if [[ -z "${PAGE_WEIGHTS[$clean_slug]:-}" || "$fm_weight" != "9999999" ]]; then
+                    PAGE_WEIGHTS["$clean_slug"]="$fm_weight"
+                fi
+                if [[ -n "$d_btypes" ]]; then
+                    local bt; local IFS_s="$IFS"; IFS=','
+                    for bt in $d_btypes; do [[ -n "$bt" ]] && SEARCH_BLOCK_TYPES["$bt"]=1; done
+                    IFS="$IFS_s"
+                fi
+                if [[ -n "$d_bkeys" ]]; then
+                    local bk b_k b_v; local IFS_s="$IFS"; IFS=','
+                    for bk in $d_bkeys; do
+                        [[ -z "$bk" ]] && continue
+                        b_k="${bk%%=*}"; b_v="${bk#*=}"
+                        [[ -z "${BLOCK_TITLE_KEYS[$b_k]:-}" ]] && BLOCK_TITLE_KEYS["$b_k"]="$b_v"
+                    done
+                    IFS="$IFS_s"
+                fi
+            done < <(LC_ALL=C awk '
+                function flush_file() {
+                    if (cur_file == "") return
+                    t = ("page.title" in vars) ? vars["page.title"] : vars["title"]
+                    w = ("page.weight" in vars) ? vars["page.weight"] : vars["weight"]
+                    tp = ("page.template" in vars) ? vars["page.template"] : vars["template"]
+                    tg = ("page.tags" in vars) ? vars["page.tags"] : vars["tags"]
+                    th = ("page.thumb" in vars) ? vars["page.thumb"] : vars["thumb"]
+                    rl = ("page.related" in vars) ? vars["page.related"] : vars["related"]
+                    bt_s = ""; for (b in btypes) bt_s = (bt_s == "" ? b : bt_s "," b)
+                    bk_s = ""; for (b in bkeys) bk_s = (bk_s == "" ? b "=" bkeys[b] : bk_s "," b "=" bkeys[b])
+                    printf "%s\x1F%s\x1F%s\x1F%s\x1F%s\x1F%s\x1F%s\x1F%s\x1F%s\n", cur_file, t, w, tp, tg, th, rl, bt_s, bk_s
+                }
+                BEGIN {
+                    id_key = "__id" "__"; ctx_key = "__context" "__"; entry_key = "__entry" "__"
+                }
+                FNR == 1 {
+                    flush_file()
+                    cur_file = FILENAME
+                    delete vars; delete btypes; delete bkeys
+                    in_fm = 0; fm_checked = 0; in_globals = 0; in_block = ""; nest = 0
+                }
+                {
+                    sub(/\r$/, "")
+                    l_trim = $0; sub(/^[ \t]+/, "", l_trim)
+                    if (!fm_checked) {
+                        fm_checked = 1
+                        if ($0 == "---") { in_fm = 1; next }
+                    }
+                    if (in_fm) {
+                        if ($0 == "---") { in_fm = 0; next }
+                        idx = index(l_trim, ":")
+                        if (idx > 1) {
+                            k = substr(l_trim, 1, idx - 1)
+                            if (k ~ /^[a-zA-Z0-9_.-]+$/) {
+                                v = substr(l_trim, idx + 1)
+                                sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+                                sub(/^["\x27]/, "", v); sub(/["\x27]$/, "", v)
+                                vars[k] = v; vars["page." k] = v
+                                if (k == "weighted") { vars["weight"] = v; vars["page.weight"] = v }
+                            }
+                        }
+                        next
+                    }
+                    check_trim = l_trim
+                    if (in_block != "" && check_trim ~ /^::[ \t]*\{\{/) sub(/^::[ \t]*/, "", check_trim)
+                    if (index(check_trim, "{{") == 1 && index(check_trim, "block.") > 0 && check_trim ~ /\}\}[ \t]*$/) {
+                        r_trim = check_trim; sub(/[ \t]+$/, "", r_trim)
+                        inner = substr(r_trim, 3, length(r_trim) - 4)
+                        sub(/^[ \t]+/, "", inner); sub(/[ \t]+$/, "", inner)
+                        if (inner == "block.end") {
+                            if (nest > 0) { nest--; next }
+                            in_globals = 0; in_block = ""; next
+                        } else if (index(inner, "block.") == 1) {
+                            if (in_block != "") { nest++; next }
+                            bname = substr(inner, 7)
+                            if (bname ~ /^[a-zA-Z0-9_-]+$/) {
+                                if (bname == "globals") in_globals = 1
+                                else {
+                                    in_block = bname
+                                    btypes[bname] = 1
+                                    if (bname == "table") bkeys["table"] = "caption"
+                                }
+                                next
+                            }
+                        }
+                    }
+                    if (in_globals) {
+                        if (index(l_trim, "::") == 1) {
+                            after_col = substr(l_trim, 3); sub(/^[ \t]+/, "", after_col)
+                            idx = index(after_col, ":")
+                            if (idx > 1) {
+                                k = substr(after_col, 1, idx - 1)
+                                if (k ~ /^[a-zA-Z0-9_.-]+$/) {
+                                    v = substr(after_col, idx + 1)
+                                    sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+                                    sub(/^["\x27]/, "", v); sub(/["\x27]$/, "", v)
+                                    vars[k] = v; vars["page." k] = v
+                                    if (k == "weighted") { vars["weight"] = v; vars["page.weight"] = v }
+                                }
+                            }
+                        }
+                        next
+                    }
+                    if (in_block != "" && nest == 0 && index(l_trim, "::") == 1) {
+                        after_col = substr(l_trim, 3); sub(/^[ \t]+/, "", after_col)
+                        idx = index(after_col, ":")
+                        if (idx > 1) {
+                            k = substr(after_col, 1, idx - 1)
+                            if (k ~ /^[a-zA-Z0-9_.-]+$/) {
+                                if (!(in_block in bkeys) && k != id_key && k != ctx_key && k != entry_key) {
+                                    bkeys[in_block] = k
+                                }
+                            }
+                        }
+                    }
+                }
+                END { flush_file() }
+            ' "${dirty_files[@]}")
+        fi
+        local deleted_count=0
+        if (( meta_cache_valid == 1 )); then
+            local cf
+            for cf in "${!CACHED_META[@]}"; do
+                if [[ -z "${FOUND_FILES[$cf]:-}" ]]; then
+                    (( deleted_count++ ))
+                fi
+            done
+        fi
+        if (( force_rebuild == 0 && dirty_count == 0 && deleted_count == 0 )) && \
+           [[ -z "$p_name" && -f "$BUILDDIR/index.json" && -f "$BUILDDIR/defs.json" ]]; then
+            SHORT_CIRCUIT=1
+            return 0
+        fi
+        for p in "${_pages[@]}"; do
+            local w="${PAGE_WEIGHTS[$p]:-9999999}"
+            [[ -n "${w//[0-9]/}" ]] && w="9999999"
+            local rem="$p" prefix=""
+            while [[ "$rem" == *.* ]]; do
+                local head="${rem%%.*}"
+                if [[ -z "$prefix" ]]; then prefix="$head"; else prefix="${prefix}.${head}"; fi
+                rem="${rem#*.}"
+                IS_DIR_PAGE["$prefix"]=1
+                local cur_best_w="${DIR_BEST_WEIGHT["$prefix"]:-9999999}"
+                [[ -n "${cur_best_w//[0-9]/}" ]] && cur_best_w="9999999"
+                local cur_best_p="${DIR_BEST_PAGE["$prefix"]:-}"
+                if (( 10#$w < 10#$cur_best_w )); then
+                    DIR_BEST_WEIGHT["$prefix"]="$w"
+                    DIR_BEST_PAGE["$prefix"]="$p"
+                elif (( 10#$w == 10#$cur_best_w )); then
+                    if [[ -z "$cur_best_p" || "$p" < "$cur_best_p" ]]; then
+                        DIR_BEST_PAGE["$prefix"]="$p"
+                    fi
+                fi
+            done
+        done
+        if (( dirty_count > 0 || deleted_count > 0 || meta_cache_valid == 0 )); then
+            local btypes_str="" sf=1
+            for sk in "${!SEARCH_BLOCK_TYPES[@]}"; do
+                (( sf == 0 )) && btypes_str+=","
+                btypes_str+="$sk"
+                sf=0
+            done
+            local bkeys_str="" sf=1
+            for bk in "${!BLOCK_TITLE_KEYS[@]}"; do
+                (( sf == 0 )) && bkeys_str+=","
+                bkeys_str+="${bk}=${BLOCK_TITLE_KEYS[$bk]}"
+                sf=0
+            done
+            {
+                for p in "${_pages[@]}"; do
+                    local f="${PAGE_FILES[$p]:-}"
+                    [[ -z "$f" ]] && continue
+                    local ms="${PAGE_MTIME_SIZE[$f]:-0_0}"
+                    local m="${ms%%_*}" s="${ms#*_}"
+                    printf "PAGE\x1F%s\x1F%s\x1F%s\x1F%s\x1F%s\x1F%s\x1F%s\x1F%s\x1F%s\x1F%s\x1F%s\x1F%s\x1F%s\n" \
+                        "$m" "$s" "$f" "$p" \
+                        "${PAGE_IMPLICIT_WEIGHTS[$p]:-}" \
+                        "${PAGE_TITLES[$p]:-}" "${PAGE_WEIGHTS[$p]:-}" \
+                        "${PAGE_TEMPLATES[$p]:-}" "${PAGE_TAGS[$p]:-}" \
+                        "${PAGE_THUMBS[$p]:-}" "${PAGE_RELATED[$p]:-}" \
+                        "$btypes_str" "$bkeys_str"
+                done
+                for dw in "${!PAGE_WEIGHTS[@]}"; do
+                    if [[ -z "${PAGE_FILES[$dw]:-}" ]]; then
+                        printf "DIRW\x1F%s\x1F%s\n" "$dw" "${PAGE_WEIGHTS[$dw]}"
+                    fi
+                done
+            } > "$meta_cache_file"
+        fi
+    }
+    
+    __build_assets() {
+        mkdir -p "$BUILDDIR/_assets"
+
+        if [[ -d "$ASSETSDIR" ]]; then
+            local s_nullglob=0
+            shopt -q nullglob && s_nullglob=1 || shopt -s nullglob
+            local cwebp_bin=""
+            if [[ -f "$_WIKI_DIR/bin/cwep" ]]; then
+                cwebp_bin="$_WIKI_DIR/bin/cwep"
+                [[ -x "$cwebp_bin" ]] || chmod +x "$cwebp_bin" 2>/dev/null
+            elif [[ -f "$_WIKI_DIR/bin/cwebp" ]]; then
+                cwebp_bin="$_WIKI_DIR/bin/cwebp"
+                [[ -x "$cwebp_bin" ]] || chmod +x "$cwebp_bin" 2>/dev/null
+            elif command -v cwebp >/dev/null 2>&1; then
+                cwebp_bin="cwebp"
+            fi
+            local running_jobs=0
+            _process_dir() {
+                local dir="${1%/}"
+                local img base
+                for img in "$dir"/*; do
+                    if [[ -d "$img" ]]; then
+                        _process_dir "$img"
+                    elif [[ -f "$img" ]]; then
+                        case "$img" in
+                            *.[pP][nN][gG] | *.[jJ][pP][gG] | *.[jJ][pP][eE][gG])
+                                base="${img%.*}"
+                                if [[ ! -f "${base}.webp" ]]; then
+                                    if [[ -n "$cwebp_bin" ]]; then
+                                        "$cwebp_bin" -q 80 "$img" -o "${base}.webp" >/dev/null 2>&1 &
+                                        (( running_jobs++ ))
+                                    elif command -v convert >/dev/null 2>&1; then
+                                        convert "$img" -quality 80 "${base}.webp" >/dev/null 2>&1 &
+                                        (( running_jobs++ ))
+                                    fi
+                                    if (( running_jobs >= max_jobs )); then
+                                        wait -n 2>/dev/null || wait
+                                        (( running_jobs-- ))
+                                    fi
+                                fi
+                                ;;
+                        esac
+                    fi
+                done
+            }
+            _process_dir "$ASSETSDIR"
+            (( running_jobs > 0 )) && wait
+            cp -ru "${ASSETSDIR%/}"/* "$BUILDDIR/_assets/" 2>/dev/null || cp -r "${ASSETSDIR%/}"/* "$BUILDDIR/_assets/" 2>/dev/null || true
+            (( s_nullglob == 0 )) && shopt -u nullglob
+        fi
+    }   
+
+
+    __build_cache() {
+    mkdir -p "$cache_dir" 2>/dev/null
+    local tmpl_hash="" hash_dirs=("$_WIKI_DIR/wiki" "$_WIKI_DIR/mods" "$_WIKI_DIR/bin")
+    [[ -d "$TEMPLATEDIR" ]] && hash_dirs+=("$TEMPLATEDIR")
+    tmpl_hash=$(find "${hash_dirs[@]}" -type f -printf "%Ts_%s_%p\n" | LC_ALL=C sort | cksum)
+    tmpl_hash="${tmpl_hash%% *}_${tmpl_hash#* }"
+    tmpl_hash="${tmpl_hash%% *}"
+    local old_tmpl_hash=""
+    [[ -f "$tmpl_cache_file" ]] && old_tmpl_hash=$(<"$tmpl_cache_file")
+    if [[ "$tmpl_hash" != "$old_tmpl_hash" ]]; then
+        force_rebuild=1
+        printf "%s\n" "$tmpl_hash" > "$tmpl_cache_file"
+        > "$cache_file"
+        rm -f "$meta_cache_file"
+    fi
+    if [[ -z "$p_name" && $force_rebuild -eq 1 ]]; then
+        __log "Cleaning and preparing environment for '$w_name'..." -t info -l wiki
+        rm -f "$meta_cache_file"
+        find "$BUILDDIR" -mindepth 1 -maxdepth 1 ! -name "${cache_dir##*/}" -exec rm -rf {} + 2>/dev/null || true
+        rm -f "$cache_dir"/*_index_*.json "$cache_dir"/*.done 2>/dev/null || true
+    fi
+    mkdir -p "$BUILDDIR/_static"
+    if [[ -d "$STATICDIR" ]]; then
+        cp -ru "$STATICDIR"/* "$BUILDDIR/_static/" 2>/dev/null || cp -r "$STATICDIR"/* "$BUILDDIR/_static/" 2>/dev/null || true
+    fi
+    if [[ -f "$cache_file" ]]; then
+        while IFS=' ' read -r h f; do
+            [[ -n "$f" ]] && CACHE_HASHES["$f"]="$h"
+        done < "$cache_file"
+    fi
+    local latex_cache_file="$cache_dir/latex.cache"
+    if [[ -f "$latex_cache_file" && $force_rebuild -eq 0 ]]; then
+        local lk lv
+        while IFS=$'\t' read -r lk lv; do
+            [[ -n "$lk" ]] && LATEX_MEM_CACHE["$lk"]="${lv//$'\x01'/$'\n'}"
+        done < "$latex_cache_file"
+    fi
+}   
+
+    __build_partials() {
+        __sort_page_hierarchy _pages _SORTED_PAGES_LEAF_FIRST "." "leaf_first"
+        __partial_featured
+        __partial_menu
+        
+        for p in "${_pages[@]}"; do
+            local map_p_name="${p##*.}" map_p_dir="" map_p_url=""
+            local disp_name="${PAGE_TITLES[$p]:-}"
+            [[ -z "$disp_name" ]] && disp_name="$map_p_name"
+            if [[ "$p" == *.* ]]; then
+                local p_dir_raw="${p%.*}"
+                map_p_dir="${p_dir_raw//./\/}"; map_p_url="${map_p_dir}/${map_p_name}.html"
+            else
+                map_p_dir="."; map_p_url="${map_p_name}.html"
+            fi
+            DIR_FILES_MAP["$map_p_dir"]+="<li><a href=\"/${map_p_url}\">${disp_name}</a></li>"$'\n'
+        done
+    }
+
+    __build_title_key() {
+        [[ -n "$2" && -z "${BLOCK_TITLE_KEYS[$1]:-}" ]] && BLOCK_TITLE_KEYS["$1"]="$2"
+        return 0
+    }
+
+    
+    __build_main() {
+        if [[ -n "$p_name" ]]; then build_targets=("$p_name")
+        else build_targets=("${_pages[@]}"); fi
+        printf -v _BUILD_YEAR "%(%Y)T" -1
+        printf -v _BUILD_NOW "%(%Y/%m/%d at %H:%M)T" -1
+        local title_key_header="title_key="
+        local -A file_hashes=()
+        local -a hash_files=()
+        for p in "${build_targets[@]}"; do
+            local file="${PAGE_FILES[$p]:-}"
+            if [[ -z "$file" ]]; then
+                local p_vars="${WIKI_PAGE_VARS[${w_name}::${p}]:-}"
+                local OIFS="$IFS"; IFS=','
+                for pair in $p_vars; do
+                    local k="${pair%%:*}" v="${pair#*:}"
+                    [[ "$k" == "path" ]] && file="$v"
+                done
+                IFS="$OIFS"
+            fi
+            if [[ -f "$file" ]]; then
+                if (( force_rebuild == 1 )); then
+                    hash_files+=("$file")
+                elif [[ -z "${CACHE_HASHES[$file]:-}" ]]; then
+                    hash_files+=("$file")
+                elif [[ "${DIRTY_PAGES[$p]:-1}" -eq 1 ]]; then
+                    hash_files+=("$file")
+                fi
+            fi
+        done
+        if (( ${#hash_files[@]} > 0 )); then
+            local h_crc h_size h_file
+            while IFS=' ' read -r h_crc h_size h_file; do
+                file_hashes["$h_file"]="${h_crc}_${h_size}"
+            done < <(cksum -- "${hash_files[@]}")
+        fi
+        local -A all_search_keys=()
+        local sk
+        for sk in "${!SEARCH_BLOCK_TYPES[@]}"; do all_search_keys["$sk"]=1; done
+        all_search_keys["page"]=1
+        local pre_search_js="const SEARCH_CONFIG = ["
+        local sf=1
+        for sk in "${!all_search_keys[@]}"; do
+            (( sf == 0 )) && pre_search_js+=","
+            local fallback="${sk^}"
+            local tkey="${BLOCK_TITLE_KEYS[$sk]:-$sk}"
+            [[ "$sk" == "page" ]] && tkey="pagename"
+            [[ "$sk" == "table" ]] && tkey="caption"
+            [[ "$sk" == "tag" ]] && tkey="pagename"
+            pre_search_js+=" { id: '$sk', others: ['${sk}s'], titleKey: '$tkey', fallback: '$fallback' }"
+            sf=0
+        done
+        pre_search_js+=" ];"
+        local WIKI_SEARCH_JS="$pre_search_js"
+        local -a scan_files=()
+        local -A file_to_page=()
+        local has_cached_refs=0
+        (( ${#WIKI_REFS[@]} > 0 )) && has_cached_refs=1
+        for p in "${_pages[@]}"; do
+            local p_file="${PAGE_FILES[$p]:-}"
+            if [[ -f "$p_file" ]]; then
+                file_to_page["$p_file"]="$p"
+                if (( force_rebuild == 1 || has_cached_refs == 0 || ${DIRTY_PAGES[$p]:-1} == 1 )); then
+                    scan_files+=("$p_file")
+                fi
+            fi
+        done
+        if (( ${#scan_files[@]} > 0 )); then
+            local ref_f ref_b ref_k ref_a p_slug
+            while IFS=$'\t' read -r ref_f ref_b ref_k ref_a; do
+                p_slug="${file_to_page[$ref_f]:-}"
+                [[ -z "$p_slug" ]] && continue
+                WIKI_REFS["${ref_b}::${ref_k}"]="${p_slug}:${ref_a}"
+                WIKI_REFS["${w_name}::${ENV:-}::${ref_b}::${ref_k}"]="${p_slug}:${ref_a}"
+            done < <(LC_ALL=C awk '
+                function slugify(s) {
+                    s = tolower(s)
+                    gsub(/ /, "-", s)
+                    gsub(/\xc3[\xa0-\xa4\x80-\x84]/, "a", s)
+                    gsub(/\xc3[\xa8-\xab\x88-\x8b]/, "e", s)
+                    gsub(/\xc3[\xac-\xaf\x8c-\x8f]/, "i", s)
+                    gsub(/\xc3[\xb2-\xb6\x92-\x96]/, "o", s)
+                    gsub(/\xc3[\xb9-\xbc\x99-\x9c]/, "u", s)
+                    gsub(/\xc3[\xa7\x87]/, "c", s)
+                    gsub(/\xc3[\xb1\x91]/, "n", s)
+                    gsub(/[^a-z0-9_./-]/, "", s)
+                    if (s ~ /^-[neE]+$/) s = ""
+                    return s
+                }
+                BEGIN {
+                    id_key = "__id" "__"; ctx_key = "__context" "__"
+                    entry_key = "__entry" "__"; refs_key = "__refs" "__"
+                }
+                FNR == 1 { in_b = ""; nest = 0 }
+                {
+                    sub(/\r$/, "")
+                    if (in_b == "") {
+                        if ($0 ~ /^[ \t]*\{\{[ \t]*block\.[a-zA-Z0-9_-]+[ \t]*\}\}[ \t]*$/) {
+                            s = $0
+                            sub(/^[ \t]*\{\{[ \t]*block\./, "", s)
+                            sub(/[ \t]*\}\}[ \t]*$/, "", s)
+                            if (s != "end" && s != "globals" && s != "comment") {
+                                in_b = s; nest = 0; b_id = ""; b_ctx = ""; b_entry = ""; first_v = ""
+                            }
+                        }
+                    } else {
+                        c_line = $0
+                        sub(/^[ \t]*::[ \t]*/, "", c_line)
+                        if (c_line ~ /^[ \t]*\{\{[ \t]*block\.end[ \t]*\}\}[ \t]*$/) {
+                            if (nest > 0) { nest--; next }
+                            raw_id = (b_id != "") ? b_id : ((b_entry != "") ? b_entry : first_v)
+                            if (raw_id != "") {
+                                ref_key = slugify(raw_id)
+                                if (b_ctx != "" && index(raw_id, ".") == 0) {
+                                    ref_key = slugify(b_ctx "." raw_id)
+                                }
+                                anchor_slug = ref_key
+                                gsub(/[\/.]/, "-", anchor_slug)
+                                print FILENAME "\t" in_b "\t" ref_key "\tblock-" in_b "-" anchor_slug
+                            }
+                            in_b = ""
+                        } else if (c_line ~ /^[ \t]*\{\{[ \t]*block\.[a-zA-Z0-9_-]+.*\}\}[ \t]*$/) {
+                            nest++
+                        } else if (nest == 0 && $0 ~ /^[ \t]*::[ \t]*[a-zA-Z0-9_.-]+:/) {
+                            s = $0
+                            sub(/^[ \t]*::[ \t]*/, "", s)
+                            idx = index(s, ":")
+                            k = substr(s, 1, idx - 1)
+                            v = substr(s, idx + 1)
+                            sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+                            if (k == id_key) b_id = v
+                            else if (k == ctx_key) b_ctx = v
+                            else if (k == "context") b_ctx = v
+                            else if (k == entry_key) b_entry = v
+                            else if (first_v == "" && k != refs_key) first_v = v
+                        }
+                    }
+                }
+            ' "${scan_files[@]}")
+        fi
+        local refs_tsv_file="$cache_dir/refs.tsv"
+        if [[ -n "${SEARCH_BLOCK_TYPES[def]:-}" || ${#scan_files[@]} -gt 0 ]]; then
+            {
+                local rk
+                for rk in "${!WIKI_REFS[@]}"; do
+                    printf "%s\t%s\n" "$rk" "${WIKI_REFS[$rk]}"
+                done
+            } > "$refs_tsv_file"
+        fi
+        local -A LAYOUT_CACHE=()
+        local -a render_targets=()
+        local -A page_file_map=() page_tmpl_map=() page_curdir_map=() page_outpath_map=() page_hash_map=()
+        local -A unique_out_dirs=()
+        for p in "${build_targets[@]}"; do
+            local file="${PAGE_FILES[$p]:-}"
+            local p_tmpl="${PAGE_TEMPLATES[$p]:-}"
+            if [[ -z "$file" ]]; then
+                local p_vars="${WIKI_PAGE_VARS[${w_name}::${p}]:-}"
+                local OIFS="$IFS"; IFS=','
+                for pair in $p_vars; do
+                    local k="${pair%%:*}" v="${pair#*:}"
+                    case "$k" in
+                        path) file="$v" ;;
+                        template) [[ -z "$p_tmpl" ]] && p_tmpl="$v" ;;
+                    esac
+                done
+                IFS="$OIFS"
+            fi
+            if [[ ! -f "$file" ]]; then continue; fi
+            local current_dir="${p%.*}"
+            if [[ "$current_dir" == "$p" ]]; then current_dir="."; fi
+            [[ -z "$p_tmpl" ]] && p_tmpl="${PAGE_TEMPLATES["$p"]:-}"
+            if [[ -z "$p_tmpl" ]]; then
+                local idx_slug="${current_dir}.index"
+                [[ "$current_dir" == "." ]] && idx_slug="index"
+                if [[ "$p" != "$idx_slug" ]]; then
+                    p_tmpl="${PAGE_TEMPLATES["$idx_slug"]:-}"
+                fi
+            fi
+            if [[ -n "$p_tmpl" && "$p_tmpl" != *.* ]]; then
+                p_tmpl="${p_tmpl}.html"
+            fi
+            if [[ -n "$p_tmpl" && "$p_tmpl" != /* && "$p_tmpl" != "${TEMPLATEDIR}/"* ]]; then
+                p_tmpl="${TEMPLATEDIR}/${p_tmpl}"
+            fi
+            local page_tmpl_raw="${p_tmpl:-$TEMPLATEDIR}"
+            if [[ -n "${WIKI_TEMPLATE_VARS[$page_tmpl_raw]:-}" ]]; then
+                page_tmpl_raw="${WIKI_TEMPLATE_VARS[$page_tmpl_raw]}"
+            elif [[ -d "$page_tmpl_raw" ]]; then
+                page_tmpl_raw="${page_tmpl_raw}/layout.html"
+            fi
+            if [[ ! -f "$page_tmpl_raw" ]]; then
+                __log "Template file missing for page $p at $page_tmpl_raw" -t error -l wiki
+                continue
+            fi
+            if [[ -z "${LAYOUT_CACHE[$page_tmpl_raw]:-}" ]]; then
+                local raw_l=""
+                IFS= read -r -d '' raw_l < "$page_tmpl_raw" || true
+                LAYOUT_CACHE["$page_tmpl_raw"]="$raw_l"
+            fi
+            local out_path="$BUILDDIR/${p//./\/}.html"
+            local file_hash="${file_hashes[$file]:-${CACHE_HASHES[$file]:-}}"
+            if [[ -z "$file_hash" ]]; then
+                file_hash=$(cksum < "$file")
+                file_hash="${file_hash/ /_}"
+            fi
+            page_file_map["$p"]="$file"
+            page_tmpl_map["$p"]="$page_tmpl_raw"
+            page_curdir_map["$p"]="$current_dir"
+            page_outpath_map["$p"]="$out_path"
+            page_hash_map["$p"]="$file_hash"
+            if [[ $force_rebuild -eq 0 && "${DIRTY_PAGES[$p]:-1}" -eq 0 && "${CACHE_HASHES[$file]:-}" == "$file_hash" && -f "$out_path" ]]; then
+                continue
+            fi
+            unique_out_dirs["${out_path%/*}"]=1
+            render_targets+=("$p")
+        done
+        if (( ${#unique_out_dirs[@]} > 0 )); then
+            mkdir -p "${!unique_out_dirs[@]}"
+        fi
+        if (( ${#render_targets[@]} > 0 )); then
+            local -a rt_files=()
+            for p in "${render_targets[@]}"; do
+                rt_files+=("${page_file_map[$p]}")
+            done
+            local m_type m_expr
+            while IFS=$'\x1F' read -r m_type m_expr; do
+                [[ -z "$m_expr" ]] && continue
+                if [[ "$m_type" == "B" ]]; then
+                    local b_expr="${m_expr//$'\x02'/$'\n'}"
+                    if [[ -z "${LATEX_MEM_CACHE["block:${b_expr}"]:-}" ]]; then
+                        local svg_output
+                        svg_output=$("$_WIKI_DIR/bin/latex" --stdout --dpr 0.4 <<< "$b_expr")
+                        svg_output="${svg_output//rgba(0,0,0,1)/var(--fg)}"
+                        LATEX_MEM_CACHE["block:${b_expr}"]="$svg_output"
+                    fi
+                elif [[ -z "${LATEX_MEM_CACHE["inline:${m_expr}"]:-}" ]]; then
+                    local svg_output
+                    svg_output=$("$_WIKI_DIR/bin/latex" --stdout --inline --dpr 0.4 <<< "${m_expr}\\rule{0pt}{0pt}")
+                    svg_output="${svg_output//rgba(0,0,0,1)/var(--fg)}"
+                    local min_y=0 height=0
+                    if [[ "$svg_output" =~ viewBox=[\"\']([0-9.-]+)[[:space:],]+([0-9.-]+)[[:space:],]+([0-9.-]+)[[:space:],]+([0-9.-]+)[\"\'] ]]; then
+                        min_y="${BASH_REMATCH[2]}"
+                        height="${BASH_REMATCH[4]}"
+                    fi
+                    local align="-10px"
+                    local baseline_re='.*<rect x="[0-9.-]+" y="([0-9.-]+)" width="0"'
+                    [[ "$svg_output" =~ $baseline_re ]] && align="${BASH_REMATCH[1]}pt - (${min_y}pt + ${height}pt) - 1px"
+                    LATEX_MEM_CACHE["inline:${m_expr}"]="<span class=\"latex-inline\" style=\"vertical-align: calc(${align});\">${svg_output}</span>"
+                fi
+            done < <(LC_ALL=C awk '
+                FNR == 1 { in_tex = 0; tex_buf = "" }
+                {
+                    sub(/\r$/, "")
+                    c_line = $0
+                    sub(/^[ \t]+/, "", c_line)
+                    if (c_line ~ /^::[ \t]?/) {
+                        sub(/^::[ \t]?/, "", c_line)
+                        sub(/^[ \t]+/, "", c_line)
+                    }
+                    r_line = c_line
+                    sub(/[ \t]+$/, "", r_line)
+                    if (in_tex == 1) {
+                        if (r_line ~ /^\{\{[ \t]*block\.end[ \t]*\}\}$/) {
+                            if (tex_buf != "" && !(("B:" tex_buf) in seen)) {
+                                seen["B:" tex_buf] = 1
+                                print "B\x1F" tex_buf
+                            }
+                            in_tex = 0; tex_buf = ""
+                        } else {
+                            tex_buf = (tex_buf == "" ? c_line : tex_buf "\x02" c_line)
+                        }
+                        next
+                    } else if (in_tex == 2) {
+                        if (r_line == "$$") {
+                            if (tex_buf != "" && !(("B:" tex_buf) in seen)) {
+                                seen["B:" tex_buf] = 1
+                                print "B\x1F" tex_buf
+                            }
+                            in_tex = 0; tex_buf = ""
+                        } else {
+                            tex_buf = (tex_buf == "" ? c_line : tex_buf "\x02" c_line)
+                        }
+                        next
+                    }
+                    if (r_line ~ /^\{\{[ \t]*block\.tex[ \t]*\}\}$/) {
+                        in_tex = 1; tex_buf = ""; next
+                    }
+                    if (r_line == "$$") {
+                        in_tex = 2; tex_buf = ""; next
+                    }
+                    if (r_line ~ /^\$\$.+\$\$$/ && length(r_line) > 4) {
+                        b_m = substr(r_line, 3, length(r_line) - 4)
+                        if (b_m != "" && !(("B:" b_m) in seen)) {
+                            seen["B:" b_m] = 1
+                            print "B\x1F" b_m
+                        }
+                        next
+                    }
+                    if (index($0, "$") > 0) {
+                        s = $0
+                        gsub(/\$\$/, "")
+                        bt = sprintf("%c", 96)
+                        while ((i1 = index(s, bt)) > 0) {
+                            r = substr(s, i1 + 1)
+                            i2 = index(r, bt)
+                            if (i2 == 0) break
+                            s = substr(s, 1, i1 - 1) substr(r, i2 + 1)
+                        }
+                        while ((i1 = index(s, "$")) > 0) {
+                            r = substr(s, i1 + 1)
+                            i2 = index(r, "$")
+                            if (i2 == 0) break
+                            m = substr(r, 1, i2 - 1)
+                            if (m != "" && !(("I:" m) in seen)) {
+                                seen["I:" m] = 1
+                                print "I\x1F" m
+                            }
+                            s = substr(r, i2 + 1)
+                        }
+                    }
+                }
+            ' "${rt_files[@]}")
+            if (( ${#LATEX_MEM_CACHE[@]} > 0 )); then
+                local lk lv
+                {
+                    for lk in "${!LATEX_MEM_CACHE[@]}"; do
+                        lv="${LATEX_MEM_CACHE[$lk]}"
+                        printf "%s\t%s\n" "$lk" "${lv//$'\n'/$'\x01'}"
+                    done
+                } > "$cache_dir/latex.cache"
+            fi
+        fi
+        if (( ${#render_targets[@]} > 1 && max_jobs > 1 )); then
+            local running_jobs=0
+            for p in "${render_targets[@]}"; do
+                local file="${page_file_map[$p]}"
+                local page_tmpl_raw="${page_tmpl_map[$p]}"
+                local current_dir="${page_curdir_map[$p]}"
+                local out_path="${page_outpath_map[$p]}"
+                local file_hash="${page_hash_map[$p]}"
+                local pagename="$p"
+                (
+                    local RAW_LAYOUT="${LAYOUT_CACHE["$page_tmpl_raw"]}"
+                    local -a layout_lines
+                    mapfile -t layout_lines <<< "$RAW_LAYOUT"
+                    declare -A SEARCH_INDEX_MAP=()
+                    local -A PAGE_TITLE_KEYS=()
+                    __render_main "$file" "$pagename" "$out_path" "$current_dir"
+                    local -A idx_written=()
+                    for k in "${!SEARCH_INDEX_MAP[@]}"; do
+                        local new_content="${SEARCH_INDEX_MAP[$k]}"
+                        if [[ -n "$new_content" ]]; then
+                            local idx_path="$cache_dir/${pagename}_index_${k}.json"
+                            printf "%s%s\n%s" "$title_key_header" "${PAGE_TITLE_KEYS[$k]:-}" "$new_content" > "$idx_path"
+                            idx_written["$idx_path"]=1
+                        fi
+                    done
+                    local -a idx_stale=()
+                    for idx_f in "$cache_dir/$pagename"_index_*.json; do
+                        if [[ -f "$idx_f" && -z "${idx_written[$idx_f]:-}" ]]; then
+                            [[ "${idx_f#"$cache_dir/$pagename"_index_}" == *_index_* ]] && continue
+                            idx_stale+=("$idx_f")
+                        fi
+                    done
+                    (( ${#idx_stale[@]} )) && rm -f -- "${idx_stale[@]}"
+                    printf "%s\t%s\n" "$file" "$file_hash" > "$cache_dir/${pagename}.done"
+                ) &
+                (( running_jobs++ ))
+                if (( running_jobs >= max_jobs )); then
+                    wait -n 2>/dev/null
+                    (( running_jobs-- ))
+                fi
+            done
+            wait
+        elif (( ${#render_targets[@]} > 0 )); then
+            for p in "${render_targets[@]}"; do
+                local file="${page_file_map[$p]}"
+                local page_tmpl_raw="${page_tmpl_map[$p]}"
+                local current_dir="${page_curdir_map[$p]}"
+                local out_path="${page_outpath_map[$p]}"
+                local file_hash="${page_hash_map[$p]}"
+                local pagename="$p"
+                local RAW_LAYOUT="${LAYOUT_CACHE["$page_tmpl_raw"]}"
+                local -a layout_lines
+                mapfile -t layout_lines <<< "$RAW_LAYOUT"
+                SEARCH_INDEX_MAP=()
+                PAGE_TITLE_KEYS=()
+                __render_main "$file" "$pagename" "$out_path" "$current_dir"
+                local -A idx_written=()
+                for k in "${!SEARCH_INDEX_MAP[@]}"; do
+                    local new_content="${SEARCH_INDEX_MAP[$k]}"
+                    if [[ -n "$new_content" ]]; then
+                        local idx_path="$cache_dir/${pagename}_index_${k}.json"
+                        printf "%s%s\n%s" "$title_key_header" "${PAGE_TITLE_KEYS[$k]:-}" "$new_content" > "$idx_path"
+                        idx_written["$idx_path"]=1
+                        __build_title_key "$k" "${PAGE_TITLE_KEYS[$k]:-}"
+                    fi
+                done
+                local -a idx_stale=()
+                for idx_f in "$cache_dir/$pagename"_index_*.json; do
+                    if [[ -f "$idx_f" && -z "${idx_written[$idx_f]:-}" ]]; then
+                        [[ "${idx_f#"$cache_dir/$pagename"_index_}" == *_index_* ]] && continue
+                        idx_stale+=("$idx_f")
+                    fi
+                done
+                (( ${#idx_stale[@]} )) && rm -f -- "${idx_stale[@]}"
+                printf "%s\t%s\n" "$file" "$file_hash" > "$cache_dir/${pagename}.done"
+            done
+        fi
+        SEARCH_INDEX_MAP=()
+        for p in "${build_targets[@]}"; do
+            local pagename="$p"
+            local file="${page_file_map[$p]:-}"
+            local done_marker="$cache_dir/${pagename}.done"
+            if [[ -f "$done_marker" ]]; then
+                local df dh
+                IFS=$'\t' read -r df dh < "$done_marker"
+                true
+                [[ -n "$df" && -n "$dh" ]] && CACHE_HASHES["$df"]="$dh"
+                rm -f "$done_marker"
+            fi
+            local -a replay_names=() replay_keys=() replay_chunks=()
+            local replay_ok=1
+            for idx_f in "$cache_dir/$pagename"_index_*.json; do
+                [[ -f "$idx_f" ]] || continue
+                local bname="${idx_f##*_index_}"
+                bname="${bname%.json}"
+                local chunk=""
+                IFS= read -r -d '' chunk < "$idx_f"
+                true
+                if [[ "$chunk" != "$title_key_header"* ]]; then replay_ok=0; break; fi
+                local header="${chunk%%$'\n'*}"
+                replay_names+=("$bname")
+                replay_keys+=("${header#"$title_key_header"}")
+                replay_chunks+=("${chunk#*$'\n'}")
+            done
+            if (( replay_ok )); then
+                local ri
+                for ri in "${!replay_names[@]}"; do
+                    bname="${replay_names[$ri]}"
+                    SEARCH_INDEX_MAP["$bname"]+="${replay_chunks[$ri]}"
+                    __build_title_key "$bname" "${replay_keys[$ri]}"
+                done
+            fi
+        done
+        local search_changed=0
+        for k in "${!SEARCH_INDEX_MAP[@]}"; do
+            if [[ -z "${all_search_keys[$k]:-}" ]]; then
+                search_changed=1
+                break
+            fi
+        done
+        if (( search_changed )); then
+            local search_js="const SEARCH_CONFIG = ["
+            local sf=1
+            for k in "${!SEARCH_INDEX_MAP[@]}"; do
+                (( sf == 0 )) && search_js+=","
+                local fallback="${k^}"
+                local tkey="${BLOCK_TITLE_KEYS[$k]:-$k}"
+                [[ "$k" == "page" ]] && tkey="pagename"
+                [[ "$k" == "table" ]] && tkey="caption"
+                [[ "$k" == "tag" ]] && tkey="pagename"
+                search_js+=" { id: '$k', others: ['${k}s'], titleKey: '$tkey', fallback: '$fallback' }"
+                sf=0
+            done
+            search_js+=" ];"
+            local search_marker="const SEARCH_CONFIG = ["
+            for p in "${build_targets[@]}"; do
+                local out_path="$BUILDDIR/${p//./\/}.html"
+                if [[ -f "$out_path" ]]; then
+                    local html_content
+                    html_content="$(<"$out_path")"
+                    local pre="${html_content%"$search_marker"*}"
+                    if [[ "$html_content" == *"%%WIKI_SEARCH_CONFIG%%"* ]]; then
+                        html_content="${html_content//%%WIKI_SEARCH_CONFIG%%/$search_js}"
+                        printf "%s" "$html_content" > "$out_path"
+                    elif (( ${#pre} < ${#html_content} )); then
+                        local post="${html_content:${#pre}+${#search_marker}}"
+                        post="${post#*\];}"
+                        html_content="${pre}${search_js}${post}"
+                        printf "%s" "$html_content" > "$out_path"
+                    fi
+                fi
+            done
+        fi
+    }
+
+    __build_search_index() {
+        {
+            for f in "${!CACHE_HASHES[@]}"; do
+                printf "%s %s\n" "${CACHE_HASHES[$f]}" "$f"
+            done
+        } > "$cache_file"
+        __save
+        if (( ${#LATEX_MEM_CACHE[@]} > 0 )); then
+            local lk lv
+            {
+                for lk in "${!LATEX_MEM_CACHE[@]}"; do
+                    lv="${LATEX_MEM_CACHE[$lk]}"
+                    printf "%s\t%s\n" "$lk" "${lv//$'\n'/$'\x01'}"
+                done
+            } > "$cache_dir/latex.cache"
+        fi
+
+        {
+            printf "{"
+            local first=1 k arr_str
+            for k in "${!SEARCH_INDEX_MAP[@]}"; do
+                arr_str="${SEARCH_INDEX_MAP[$k]}"
+                arr_str="${arr_str%$'\n'}"
+                arr_str="${arr_str%,}"
+                if (( first == 0 )); then
+                    printf ",\"%s\": [ %s ]" "$k" "$arr_str"
+                else
+                    printf "\"%s\": [ %s ]" "$k" "$arr_str"
+                    first=0
+                fi
+            done
+            printf "}"
+        } > "$BUILDDIR/index.json"
+    }    
+
+    __build_defs_index() {
+        local defs_data="${SEARCH_INDEX_MAP["def"]:-}"
+        if [[ -z "$defs_data" ]]; then
+            printf "{\n}\n" > "$BUILDDIR/defs.json"
+            __log "Generated defs index -> $BUILDDIR/defs.json" -t success -l wiki
+            return 0
+        fi
+        LC_ALL=C awk '
+            function slugify(s) {
+                s = tolower(s)
+                gsub(/ /, "-", s)
+                gsub(/\xc3[\xa0-\xa4\x80-\x84]/, "a", s)
+                gsub(/\xc3[\xa8-\xab\x88-\x8b]/, "e", s)
+                gsub(/\xc3[\xac-\xaf\x8c-\x8f]/, "i", s)
+                gsub(/\xc3[\xb2-\xb6\x92-\x96]/, "o", s)
+                gsub(/\xc3[\xb9-\xbc\x99-\x9c]/, "u", s)
+                gsub(/\xc3[\xa7\x87]/, "c", s)
+                gsub(/\xc3[\xb1\x91]/, "n", s)
+                gsub(/[^a-z0-9_./-]/, "", s)
+                if (s ~ /^-[neE]+$/) s = ""
+                return s
+            }
+            function extract_val(line, key,    pat, idx, tmp) {
+                pat = "\"" key "\":\""
+                idx = index(line, pat)
+                if (idx == 0) return ""
+                tmp = substr(line, idx + length(pat))
+                idx = index(tmp, "\"")
+                if (idx == 0) return ""
+                return substr(tmp, 1, idx - 1)
+            }
+            BEGIN {
+                ctx_key = "__context" "__"
+                id_key = "__id" "__"
+                k_count = 0
+            }
+            {
+                sub(/[ \t\r]+$/, "")
+                if ($0 == "") next
+                url = extract_val($0, "url")
+                context = extract_val($0, ctx_key)
+                term = extract_val($0, "term")
+                id = extract_val($0, id_key)
+                related = extract_val($0, "related")
+                raw_id = (id != "" ? id : term)
+                if (raw_id == "") next
+                ref_key = slugify(raw_id)
+                if (context != "" && index(raw_id, ".") == 0) {
+                    ref_key = slugify(context "." raw_id)
+                }
+                if (!(ref_key in defs_urls)) {
+                    defs_urls[ref_key] = url
+                    keys_order[++k_count] = ref_key
+                }
+                if (related != "") {
+                    n = split(related, items, ",")
+                    for (i = 1; i <= n; i++) {
+                        r = items[i]
+                        sub(/^[ \t]+/, "", r); sub(/[ \t]+$/, "", r)
+                        sub(/^def\./, "", r)
+                        if (r != "") {
+                            r = slugify(r)
+                            pair = ref_key "::" r
+                            if (!(pair in seen_deps)) {
+                                seen_deps[pair] = 1
+                                defs_deps[ref_key] = (defs_deps[ref_key] != "" ? defs_deps[ref_key] ",\"" r "\"" : "\"" r "\"")
+                            }
+                            rpair = r "::" ref_key
+                            if (!(rpair in seen_rdeps)) {
+                                seen_rdeps[rpair] = 1
+                                defs_rdeps[r] = (defs_rdeps[r] != "" ? defs_rdeps[r] ",\"" ref_key "\"" : "\"" ref_key "\"")
+                            }
+                        }
+                    }
+                }
+            }
+            END {
+                printf "{"
+                for (i = 1; i <= k_count; i++) {
+                    k = keys_order[i]
+                    if (i > 1) printf ","
+                    printf "\n  \"%s\": { \"url\": \"%s\", \"deps\": [ %s ], \"rdeps\": [ %s ] }", k, defs_urls[k], defs_deps[k], defs_rdeps[k]
+                }
+                printf "\n}\n"
+            }
+        ' <<< "$defs_data" > "$BUILDDIR/defs.json"
+        __log "Generated defs index -> $BUILDDIR/defs.json" -t success -l wiki
+    }   
+
+    __build_sitemap() {
+        local domain=""
+        
+        if [[ "${WIKI_VARS[$w_name]:-}" =~ (domain|url):[[:space:]]*([^,]+) ]]; then
+            domain="${BASH_REMATCH[2]}"
+        fi
+        
+        if [[ -z "$domain" ]]; then
+            __log "No domain was found. Skipping sitemap.xml generation." -t warning -l wiki
+            return 1
+        fi
+        
+        domain="${domain%/}"
+        [[ "$domain" != http://* && "$domain" != https://* ]] && domain="https://$domain"
+        
+        local current_date
+        printf -v current_date "%(%Y-%m-%d)T" -1
+        
+        local xml_content="<?xml version=\"1.0\" encoding=\"UTF-8\"?>"$'\n'
+        xml_content+="<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">"$'\n'
+        
+        local -A commit_dates=() dirty=()
+        local line date="" git_top="" git_shallow="" src_key=""
+        { read -r git_top; read -r git_shallow; } < <(git -C "$SOURCEDIR" rev-parse --show-toplevel --is-shallow-repository 2>/dev/null)
+        if [[ "$git_shallow" == "true" ]]; then
+            __log "Shallow git clone: sitemap lastmod uses the build date." -t warning -l wiki
+        elif [[ -n "$git_top" ]] && src_key="$(cd "$SOURCEDIR" 2>/dev/null && pwd -P)" && [[ "$src_key" == "$git_top" || "$src_key" == "$git_top"/* ]]; then
+            src_key="${src_key#"$git_top"}"
+            src_key="${src_key#/}"
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && dirty["$line"]=1
+            done < <(git -C "$git_top" -c core.quotepath=off diff --name-only HEAD -- "${src_key:-.}" 2>/dev/null)
+            while IFS= read -r line; do
+                if [[ "$line" == ">"* ]]; then date="${line#>}"
+                elif [[ -n "$line" && -z "${commit_dates[$line]:-}" ]]; then commit_dates["$line"]="$date"
+                fi
+            done < <(git -C "$git_top" -c core.quotepath=off log --format='>%cd' --date=short --name-only -- "${src_key:-.}" 2>/dev/null)
+        fi
+        
+        local p path loc file lastmod p_vars
+        for p in "${_pages[@]}"; do
+            path="${p//./\/}.html"
+            loc="${domain}/${path}"
+            [[ "$path" == "index.html" ]] && loc="${domain}/"
+            
+            file=""
+            p_vars="${WIKI_PAGE_VARS[${w_name}::${p}]:-}"
+            [[ "$p_vars" =~ (^|,)path:([^,]+) ]] && file="${BASH_REMATCH[2]}"
+            if [[ -n "$file" && "$file" == "$SOURCEDIR"/* ]]; then
+                file="${file#"$SOURCEDIR"/}"
+                [[ -n "$src_key" ]] && file="$src_key/$file"
+            else
+                file=""
+            fi
+            
+            lastmod="$current_date"
+            if [[ -n "$file" && -z "${dirty[$file]:-}" && -n "${commit_dates[$file]:-}" ]]; then
+                lastmod="${commit_dates[$file]}"
+            fi
+            
+            xml_content+="  <url>"$'\n'
+            xml_content+="    <loc>${loc}</loc>"$'\n'
+            xml_content+="    <lastmod>${lastmod}</lastmod>"$'\n'
+            xml_content+="  </url>"$'\n'
+        done
+        xml_content+="</urlset>"$'\n'
+        
+        printf "%s" "$xml_content" > "$BUILDDIR/sitemap.xml"
+        __log "Generated sitemap -> $BUILDDIR/sitemap.xml" -t success -l wiki
+    }
+
+}

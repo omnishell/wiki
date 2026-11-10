@@ -1,0 +1,779 @@
+#! /bin/bash
+
+__partials__() {
+   
+    __partial_featured() {
+        local -a _featured_list=()
+        if declare -p WIKI_FEATURED >/dev/null 2>&1; then
+            if [[ "$(declare -p WIKI_FEATURED)" == "declare -a"* ]]; then _featured_list=("${WIKI_FEATURED[@]}")
+            else read -ra _featured_list <<< "$WIKI_FEATURED"; fi
+        else _featured_list=("${_global_pages[@]}"); fi
+
+        local -A feat_title=() feat_weight=() feat_url=() seen_feat=()
+        local -a resolved_list=()
+        local fpage
+
+        for fpage in "${_featured_list[@]}"; do
+            [[ -n "${seen_feat[$fpage]:-}" ]] && continue
+            seen_feat["$fpage"]=1
+            local w="" t="" url=""
+
+            if [[ -n "${PAGE_TITLES[$fpage]:-}" || -n "${PAGE_WEIGHTS[$fpage]:-}" ]]; then
+                w="${PAGE_WEIGHTS[$fpage]:-9999}"
+                t="${PAGE_TITLES[$fpage]:-}"
+                url="/${fpage//./\/}.html"
+            elif [[ -n "${PAGE_TITLES[${fpage}.index]:-}" || -n "${PAGE_WEIGHTS[${fpage}.index]:-}" ]]; then
+                w="${PAGE_WEIGHTS[${fpage}.index]:-9999}"
+                t="${PAGE_TITLES[${fpage}.index]:-}"
+                url="/${fpage//./\/}/index.html"
+            else
+                local best_page="${DIR_BEST_PAGE[$fpage]:-}"
+                if [[ -n "$best_page" ]]; then
+                    w="${PAGE_WEIGHTS[$best_page]:-9999}"
+                    t="${PAGE_TITLES[$best_page]:-}"
+                    url="/${best_page//./\/}.html"
+                else
+                    w=9999
+                    t="${fpage##*.}"
+                    t="${t^}"
+                    url="/${fpage//./\/}.html"
+                fi
+            fi
+
+            [[ -z "$t" ]] && { t="${fpage##*.}"; t="${t^}"; }
+            [[ -n "${w//[0-9]/}" || -z "$w" ]] && w=9999
+
+            feat_title["$fpage"]="$t"
+            feat_weight["$fpage"]="$w"
+            feat_url["$fpage"]="$url"
+            resolved_list+=("$fpage")
+        done
+
+        local n=${#resolved_list[@]}
+        if (( n > 1 )); then
+            local i j key kw jpage jw
+            for (( i=1; i<n; i++ )); do
+                key="${resolved_list[i]}"
+                kw="${feat_weight[$key]}"
+                j=$(( i - 1 ))
+                while (( j >= 0 )); do
+                    jpage="${resolved_list[j]}"
+                    jw="${feat_weight[$jpage]}"
+                    if (( 10#$jw > 10#$kw )) || { (( 10#$jw == 10#$kw )) && [[ "$jpage" > "$key" ]]; }; then
+                        resolved_list[j+1]="$jpage"
+                        (( j-- ))
+                    else
+                        break
+                    fi
+                done
+                resolved_list[j+1]="$key"
+            done
+        fi
+
+        WIKI_FEATURED_HTML=""
+        for fpage in "${resolved_list[@]}"; do
+            WIKI_FEATURED_HTML+="<a href=\"${feat_url[$fpage]}\" class=\"menu-item\">${feat_title[$fpage]}</a>"$'\n'
+        done
+    }
+    
+    __partial_menu_r() {
+        REPLY=""
+        local m_root="" m_depth="999" m_type="" m_root_label="" m_page_label="title" m_exclude="" m_closed="-1" m_open_current="0" m_collapsible="false"
+        if [[ $# -gt 0 ]]; then
+            local str="$*"
+            while [[ "$str" =~ ([a-zA-Z_]+)=([^\"\'[:space:]]+|\"([^\"]+)\"|\'([^\']+)\') ]]; do
+                local key="${BASH_REMATCH[1]}"
+                local val="${BASH_REMATCH[4]:-${BASH_REMATCH[3]:-${BASH_REMATCH[2]}}}"
+                if [[ "$key" == "root" ]]; then m_root="$val"
+                elif [[ "$key" == "depth" ]]; then m_depth="$val"
+                elif [[ "$key" == "type" ]]; then m_type="$val"
+                elif [[ "$key" == "root_label" ]]; then m_root_label="$val"
+                elif [[ "$key" == "page_label" ]]; then m_page_label="$val"
+                elif [[ "$key" == "exclude" ]]; then m_exclude="$val"
+                elif [[ "$key" == "closed" ]]; then m_closed="$val"
+                elif [[ "$key" == "open_current" ]]; then m_open_current="$val"
+                elif [[ "$key" == "collapsible" ]]; then m_collapsible="${val,,}"
+                fi
+                str="${str#*${BASH_REMATCH[0]}}"
+            done
+            local orig_root="$m_root"
+            m_root="${m_root#/}"
+            m_root="${m_root%/}"
+            local prefix="${m_root//\//.}"
+            [[ -n "$prefix" ]] && prefix="${prefix}."
+
+            local -a menu_parts=()
+            local global_open=""
+            if [[ "$m_closed" != "-1" || "$m_open_current" != "0" ]]; then
+                global_open=" open"
+            fi
+
+            if [[ "$m_collapsible" == "true" || "$m_collapsible" == "1" ]]; then
+                menu_parts+=("<details class=\"menu-global-details\"${global_open}><summary><span class=\"toggle-icon\"></span><span class=\"menu-global-text\"></span></summary>")
+            fi
+
+            menu_parts+=("<ul class=\"menu-ul\">")
+            if [[ -n "$m_root" || "$orig_root" == "/" ]]; then
+                local root_node="${prefix%.}"
+                local root_disp=""
+                if [[ -n "$m_root_label" ]]; then
+                    root_disp="$m_root_label"
+                else
+                    [[ -n "$root_node" ]] && root_disp="${PAGE_TITLES[$root_node]:-}"
+                    [[ -z "$root_disp" ]] && root_disp="${m_root}"
+                    [[ -z "$root_disp" ]] && root_disp="/"
+                fi
+                [[ "$root_disp" != */ ]] && root_disp="${root_disp}/"
+
+                local root_open=" open"
+                if (( m_closed >= 0 && 0 >= m_closed )); then root_open=""; fi
+                [[ "$m_open_current" == "1" && -n "$pagename" && "$pagename" == "${prefix}"* ]] && root_open=" open"
+
+                menu_parts+=("<li class=\"menu-details\"><details${root_open}><summary><span class=\"toggle-icon\"></span>${root_disp}</summary>" "<ul class=\"menu-ul-inner\">")
+            fi
+            local -A seen=()
+
+            local -a sorted_custom_pages=()
+            if [[ ${#_SORTED_PAGES_LEAF_FIRST[@]} -gt 0 ]]; then
+                sorted_custom_pages=("${_SORTED_PAGES_LEAF_FIRST[@]}")
+            else
+                __sort_page_hierarchy _pages sorted_custom_pages "." "leaf_first"
+            fi
+
+            local -a current_path=()
+            local p prev_IFS="$IFS"
+            for p in "${sorted_custom_pages[@]}"; do
+                [[ -n "$prefix" && "$p" != "${prefix}"* ]] && continue
+                local rem="${p#$prefix}"
+                [[ -z "$rem" ]] && continue
+                [[ -n "$m_exclude" && $p == $m_exclude ]] && continue
+
+                IFS='.'
+                local -a parts=($rem)
+                IFS="$prev_IFS"
+
+                local p_depth=${#parts[@]}
+                local is_dir=0
+                local target_depth=$p_depth
+                if (( p_depth > m_depth )); then
+                    target_depth=$m_depth
+                    is_dir=1
+                elif [[ "${IS_DIR_PAGE["$p"]:-0}" == "1" ]]; then
+                    is_dir=1
+                fi
+
+                if [[ "$m_type" == "dir" && $is_dir -eq 0 ]]; then continue; fi
+                if [[ "$m_type" == "file" && $is_dir -eq 1 ]]; then continue; fi
+
+                local node_rem=""
+                if (( target_depth == p_depth )); then
+                    node_rem="$rem"
+                else
+                    IFS='.'
+                    node_rem="${parts[*]:0:target_depth}"
+                    IFS="$prev_IFS"
+                fi
+
+                local node_full="${prefix}${node_rem}"
+                if [[ -z "${seen[$node_full]:-}" ]]; then
+                    seen["$node_full"]="1"
+                    local disp_name=""
+
+                    if [[ "$m_page_label" == "weight" ]]; then
+                        [[ -n "$node_full" ]] && disp_name="${PAGE_WEIGHTS[$node_full]:-}"
+                        [[ -z "$disp_name" ]] && disp_name="9999999"
+                    elif [[ "$m_page_label" == "name" ]]; then
+                        disp_name="${parts[$((target_depth-1))]}"
+                    else
+                        [[ -n "$node_full" ]] && disp_name="${PAGE_TITLES[$node_full]:-}"
+                        [[ -z "$disp_name" ]] && disp_name="${parts[$((target_depth-1))]}"
+                    fi
+
+                    local page_url="${node_full//./\/}.html"
+                    if (( is_dir == 1 )); then
+                        [[ "$disp_name" != */ ]] && disp_name="${disp_name}/"
+                        local best_page="${DIR_BEST_PAGE["$node_full"]:-}"
+                        if [[ -n "$best_page" ]]; then
+                            page_url="${best_page//./\/}.html"
+                        else
+                            page_url="${node_full//./\/}/index.html"
+                        fi
+                    fi
+
+                    local -a dir_parts=("${parts[@]:0:$((target_depth-1))}")
+                    local common_len=0
+                    while [[ $common_len -lt ${#current_path[@]} && $common_len -lt ${#dir_parts[@]} && "${current_path[$common_len]}" == "${dir_parts[$common_len]}" ]]; do
+                        (( common_len++ ))
+                    done
+
+                    local k
+                    for (( k=${#current_path[@]}-1; k>=common_len; k-- )); do
+                        menu_parts+=("</ul></details></li>")
+                    done
+
+                    local -a dir_full=()
+                    if [[ "$m_open_current" == "1" ]]; then
+                        local acc=""
+                        for (( k=0; k<${#dir_parts[@]}; k++ )); do
+                            acc+="${acc:+.}${dir_parts[$k]}"
+                            dir_full[k]="$acc"
+                        done
+                    fi
+
+                    for (( k=common_len; k<${#dir_parts[@]}; k++ )); do
+                        local dir="${dir_parts[$k]}"
+                        local css_class="menu-details"
+                        (( k > 0 )) && css_class="menu-details sub-dir"
+
+                        local current_depth=$k
+                        [[ -n "$m_root" || "$orig_root" == "/" ]] && current_depth=$((k + 1))
+
+                        local dir_open=" open"
+                        if (( m_closed >= 0 && current_depth >= m_closed )); then dir_open=""; fi
+                        [[ "$m_open_current" == "1" && -n "$pagename" && "$pagename" == "${prefix}${dir_full[$k]}."* ]] && dir_open=" open"
+
+                        menu_parts+=("<li class=\"${css_class}\"><details${dir_open}><summary><span class=\"toggle-icon\"></span>${dir}/</summary><ul class=\"menu-ul-inner\">")
+                    done
+
+                    local current_attr=""
+                    [[ -n "$pagename" && "$node_full" == "$pagename" ]] && current_attr=" aria-current=\"page\""
+                    menu_parts+=("<li class=\"menu-li\"><a href=\"/${page_url}\"${current_attr}>${disp_name}</a></li>")
+
+                    current_path=("${dir_parts[@]}")
+                fi
+            done
+
+            local k
+            for (( k=${#current_path[@]}-1; k>=0; k-- )); do
+                menu_parts+=("</ul></details></li>")
+            done
+
+            if [[ -n "$m_root" || "$orig_root" == "/" ]]; then
+                menu_parts+=("</ul></details></li>")
+            fi
+            menu_parts+=("</ul>")
+
+            if [[ "$m_collapsible" == "true" || "$m_collapsible" == "1" ]]; then
+                menu_parts+=("</details>")
+            fi
+
+            IFS=$'\n'
+            REPLY="${menu_parts[*]}"$'\n'
+            IFS="$prev_IFS"
+            return 0
+        fi
+
+        local -a menu_parts=("<ul class=\"menu-ul\">")
+        local -a sorted_pages=()
+        if [[ ${#_SORTED_PAGES_LEAF_FIRST[@]} -gt 0 ]]; then
+            sorted_pages=("${_SORTED_PAGES_LEAF_FIRST[@]}")
+        elif (( ${#_nested_pages[@]} > 0 )); then
+            __sort_page_hierarchy _nested_pages sorted_pages "." "leaf_first"
+        fi
+        local -a current_path=()
+        local entry OIFS="$IFS"
+        for entry in "${sorted_pages[@]}"; do
+            [[ -z "$entry" ]] && continue
+            IFS='.'
+            local -a parts=($entry)
+            IFS="$OIFS"
+            local page_name="${parts[${#parts[@]}-1]}"
+            local -a dir_parts=("${parts[@]:0:${#parts[@]}-1}")
+            local common_len=0
+            while [[ $common_len -lt ${#current_path[@]} && $common_len -lt ${#dir_parts[@]} && "${current_path[$common_len]}" == "${dir_parts[$common_len]}" ]]; do
+                (( common_len++ ))
+            done
+            local i
+            for (( i=${#current_path[@]}-1; i>=common_len; i-- )); do
+                menu_parts+=("</ul></details></li>")
+            done
+            for (( i=common_len; i<${#dir_parts[@]}; i++ )); do
+                local dir="${dir_parts[$i]}"
+                local css_class="menu-details"
+                (( i > 0 )) && css_class="menu-details sub-dir"
+
+                local dir_open=" open"
+                if (( m_closed >= 0 && i >= m_closed )); then dir_open=""; fi
+
+                menu_parts+=("<li class=\"${css_class}\"><details${dir_open}><summary><span class=\"toggle-icon\"></span>${dir}/</summary><ul class=\"menu-ul-inner\">")
+            done
+            local page_url="${entry//./\/}.html"
+            local disp_name="${PAGE_TITLES[$entry]:-$page_name}"
+            local current_attr=""
+            [[ -n "${pagename:-}" && "$entry" == "$pagename" ]] && current_attr=" aria-current=\"page\""
+
+            menu_parts+=("<li class=\"menu-li\"><a href=\"/${page_url}\"${current_attr}>${disp_name}</a></li>")
+            current_path=("${dir_parts[@]}")
+        done
+        local i
+        for (( i=${#current_path[@]}-1; i>=0; i-- )); do
+            menu_parts+=("</ul></details></li>")
+        done
+        menu_parts+=("</ul>")
+        IFS=$'\n'
+        WIKI_MENU_HTML="${menu_parts[*]}"$'\n'
+        IFS="$OIFS"
+        REPLY="$WIKI_MENU_HTML"
+        return 0
+    }   
+
+    __partial_menu() {
+        if [[ $# -gt 0 ]]; then
+            __partial_menu_r "$@"
+            printf "%s" "$REPLY"
+        else
+            __partial_menu_r
+        fi
+    } 
+
+
+    __partial_author() {
+        local a_prefix=""
+        local str="$*"
+        while [[ "$str" =~ ([a-zA-Z_.-]+)=([^\"\'[:space:]]+|\"([^\"]+)\"|\'([^\']+)\') ]]; do
+            local key="${BASH_REMATCH[1]}"
+            local val="${BASH_REMATCH[4]:-${BASH_REMATCH[3]:-${BASH_REMATCH[2]}}}"
+            if [[ "$key" == "prefix" ]]; then a_prefix="$val"; fi
+            str="${str#*${BASH_REMATCH[0]}}"
+        done
+        WIKI_AUTHOR_HTML=""
+        local author_val="${PAGE_VARS["page.author"]:-}"
+        [[ -z "$author_val" ]] && return
+        local a_name="" a_url=""
+        if [[ -n "${WIKI_AUTHORS[${w_name}::${author_val}]:-}" ]]; then
+            local data="${WIKI_AUTHORS[${w_name}::${author_val}]}"
+            [[ "$data" =~ name:\"([^\"]+)\" ]] && a_name="${BASH_REMATCH[1]}"
+            [[ "$data" =~ url:\"([^\"]+)\" ]] && a_url="${BASH_REMATCH[1]}"
+        else
+            [[ "$author_val" =~ name=\"([^\"]+)\" ]] && a_name="${BASH_REMATCH[1]}"
+            [[ "$author_val" =~ url=\"([^\"]+)\" ]] && a_url="${BASH_REMATCH[1]}"
+            if [[ -z "$a_name" ]]; then
+                a_name="$author_val"
+            fi
+        fi
+        WIKI_AUTHOR_HTML="<author>"$'\n'"<span class=\"author-prefix\">${a_prefix}</span><a class=\"author-link\" href=\"${a_url}\">${a_name}</a>"$'\n'"</author>"
+    }
+
+    
+    __partial_search() {
+        local s_modal="false"
+        local s_page="false"
+        local s_placeholder=""
+        local str="$*"
+        while [[ "$str" =~ ([a-zA-Z_.-]+)=([^\"\'[:space:]]+|\"([^\"]+)\"|\'([^\']+)\') ]]; do
+            local key="${BASH_REMATCH[1]}"
+            local val="${BASH_REMATCH[4]:-${BASH_REMATCH[3]:-${BASH_REMATCH[2]}}}"
+            if [[ "$key" == "modal" ]]; then s_modal="${val,,}"; fi
+            if [[ "$key" == "page" ]]; then s_page="${val,,}"; fi
+            if [[ "$key" == "placeholder" ]]; then s_placeholder="$val"; fi
+            str="${str#*${BASH_REMATCH[0]}}"
+        done
+        local ph_attr_page=""
+        local ph_attr_modal=" placeholder=\"search...\""
+        local ph_attr_normal=""
+        if [[ -n "$s_placeholder" ]]; then
+            ph_attr_page=" placeholder=\"${s_placeholder}\""
+            ph_attr_modal=" placeholder=\"${s_placeholder}\""
+            ph_attr_normal=" placeholder=\"${s_placeholder}\""
+        fi
+        local close_js=" onclick=\"if(event.target.closest('a')){this.style.display='none';var m=document.getElementById('search-modal');if(m)m.style.display='none';}\""
+        if [[ "$s_page" == "true" || "$s_page" == "1" ]]; then
+            WIKI_SEARCH_HTML="<div class=\"search-page-container\">"$'\n'
+            WIKI_SEARCH_HTML+="    <form action=\"/search.html\" method=\"GET\" class=\"search-form\">"$'\n'
+            WIKI_SEARCH_HTML+="        <span class=\"search-input-prefix\">search:</span> <input type=\"text\" name=\"q\" id=\"search-page-input\" autocomplete=\"off\"${ph_attr_page}>"$'\n'
+            WIKI_SEARCH_HTML+="    </form>"$'\n'
+            WIKI_SEARCH_HTML+="    <div id=\"search-page-results\" class=\"search-inline\"></div>"$'\n'
+            WIKI_SEARCH_HTML+="</div>"
+        elif [[ "$s_modal" == "true" || "$s_modal" == "1" ]]; then
+            WIKI_SEARCH_HTML="<a href=\"#\" id=\"search-toggle\">search</a>"$'\n'
+            WIKI_SEARCH_HTML+="<div id=\"search-modal\" class=\"search-modal\" style=\"display: none;\">"$'\n'
+            WIKI_SEARCH_HTML+="    <div class=\"search-modal-content\">"$'\n'
+            WIKI_SEARCH_HTML+="        <input type=\"text\" name=\"q\" id=\"search-input\" autocomplete=\"off\"${ph_attr_modal}>"$'\n'
+            WIKI_SEARCH_HTML+="        <div id=\"search-results\" class=\"search-popup\" style=\"display: none;\"${close_js}></div>"$'\n'
+            WIKI_SEARCH_HTML+="    </div>"$'\n'
+            WIKI_SEARCH_HTML+="</div>"
+        else
+            WIKI_SEARCH_HTML="<div class=\"search-container\">"$'\n'"    <form action=\"/search.html\" method=\"GET\" class=\"search-form\" style=\"display: inline;\">"$'\n'"        <span class=\"search-input-prefix\">search:</span> <input type=\"text\" name=\"q\" id=\"search-input\" autocomplete=\"off\"${ph_attr_normal}>"$'\n'"    </form>"$'\n'"    <div id=\"search-results\" class=\"search-popup\" style=\"display: none; position: absolute; z-index: 1000;\"${close_js}></div>"$'\n'"</div>"
+        fi
+    }
+
+    __partial_breadcrumb_r() {
+        local b_root_label="Home"
+        local b_page_label="title"
+        local b_sep="/"
+        local str="$*"
+        while [[ "$str" =~ ([a-zA-Z_]+)=([^\"\'[:space:]]+|\"([^\"]+)\"|\'([^\']+)\') ]]; do
+            local key="${BASH_REMATCH[1]}"
+            local val="${BASH_REMATCH[4]:-${BASH_REMATCH[3]:-${BASH_REMATCH[2]}}}"
+            if [[ "$key" == "root_label" ]]; then b_root_label="$val"
+            elif [[ "$key" == "page_label" || "$key" == "label" ]]; then b_page_label="$val"
+            elif [[ "$key" == "sep" ]]; then b_sep="$val"
+            fi
+            str="${str#*${BASH_REMATCH[0]}}"
+        done
+        local out="<breadcrumb><a href=\"/index.html\" class=\"breadcrumb-0\">${b_root_label}</a>"
+        local -a b_parts=()
+        local OIFS="$IFS"; IFS='.'; read -ra b_parts <<< "$pagename"; IFS="$OIFS"
+        local cum_slug=""
+        local i
+        for ((i=0; i<${#b_parts[@]}; i++)); do
+            local part="${b_parts[$i]}"
+            if [[ -z "$cum_slug" ]]; then cum_slug="$part"; else cum_slug="${cum_slug}.${part}"; fi
+            local b_title=""
+            if [[ "$b_page_label" == "name" ]]; then
+                b_title="$part"
+            elif [[ "$b_page_label" == "weight" ]]; then
+                b_title="${PAGE_WEIGHTS[$cum_slug]:-9999}"
+            else
+                b_title="${PAGE_TITLES[$cum_slug]:-$part}"
+            fi
+            local b_idx=$((i + 1))
+            if [[ $i -eq $((${#b_parts[@]} - 1)) ]]; then
+                out+="<span class=\"breadcrumb-sep\">${b_sep}</span><a href=\"/${cum_slug//./\/}.html\" class=\"breadcrumb-current\">${b_title}</a>"
+            else
+                local dir_path="${cum_slug//./\/}"
+                if [[ -f "$SOURCEDIR/$dir_path/index.md" ]]; then
+                    out+="<span class=\"breadcrumb-sep\">${b_sep}</span><a href=\"/${dir_path}/index.html\" class=\"breadcrumb-${b_idx}\">${b_title}</a>"
+                elif [[ -f "$SOURCEDIR/${dir_path}.md" ]]; then
+                    out+="<span class=\"breadcrumb-sep\">${b_sep}</span><a href=\"/${dir_path}.html\" class=\"breadcrumb-${b_idx}\">${b_title}</a>"
+                else
+                    local best_page="${DIR_BEST_PAGE["$cum_slug"]:-}"
+                    if [[ -z "$best_page" ]]; then
+                        local best_weight=9999999
+                        local p
+                        for p in "${_pages[@]}"; do
+                            if [[ "$p" == "${cum_slug}."* ]]; then
+                                local remainder="${p#${cum_slug}.}"
+                                if [[ "$remainder" != *.* ]]; then
+                                    local w="${PAGE_WEIGHTS[$p]}"
+                                    [[ -z "$w" ]] && w=9999999
+                                    if (( 10#$w < 10#$best_weight )); then
+                                        best_weight=$w
+                                        best_page="$p"
+                                    elif (( 10#$w == 10#$best_weight )); then
+                                        if [[ -z "$best_page" ]] || [[ "$p" < "$best_page" ]]; then
+                                            best_page="$p"
+                                        fi
+                                    fi
+                                fi
+                            fi
+                        done
+                    fi
+                    if [[ -n "$best_page" ]]; then
+                        out+="<span class=\"breadcrumb-sep\">${b_sep}</span><a href=\"/${best_page//./\/}.html\" class=\"breadcrumb-${b_idx}\">${b_title}</a>"
+                    else
+                        out+="<span class=\"breadcrumb-sep\">${b_sep}</span><span class=\"breadcrumb-${b_idx}\">${b_title}</span>"
+                    fi
+                fi
+            fi
+        done
+        out+="</breadcrumb>"
+        REPLY="$out"
+        return 0
+    }
+
+    __partial_breadcrumb() {
+        __partial_breadcrumb_r "$@"
+        printf "%s" "$REPLY"
+    }   
+
+    __partial_thumb() {
+        WIKI_THUMB_HTML=""
+        local t_img="${PAGE_VARS["page.thumb"]:-${PAGE_VARS["thumb"]:-${PAGE_THUMBS["$pagename"]:-}}}"
+        if [[ -n "$t_img" ]]; then
+            if [[ "$t_img" == "./"* ]]; then
+                local dir_path="${current_dir//./\/}"
+                [[ "$dir_path" == "/" ]] && dir_path=""
+                t_img="/_assets${dir_path:+/$dir_path}/${t_img#./}"
+                t_img="${t_img%.*}.webp"
+            elif [[ "$t_img" != http://* && "$t_img" != https://* && "$t_img" != /* ]]; then
+                if [[ "$t_img" != *.* ]]; then
+                    if [[ -f "$BUILDDIR/_assets/${t_img}.webp" ]]; then t_img="${t_img}.webp"
+                    elif [[ -f "$BUILDDIR/_assets/${t_img}.png" ]]; then t_img="${t_img}.png"
+                    elif [[ -f "$BUILDDIR/_assets/${t_img}.jpg" ]]; then t_img="${t_img}.jpg"
+                    elif [[ -f "$BUILDDIR/_assets/${t_img}.jpeg" ]]; then t_img="${t_img}.jpeg"
+                    fi
+                fi
+                t_img="/_assets/${t_img}"
+            fi
+            WIKI_THUMB_HTML="<figure class=\"block-image\" style=\"display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;\">"$'\n'
+            WIKI_THUMB_HTML+="    <img src=\"${t_img}\" alt=\"\" class=\"block-image-img\" style=\"width: inherit;\">"$'\n'
+            WIKI_THUMB_HTML+="</figure>"
+        fi
+    }   
+    
+    __partial_tags() {
+        local t_prefix="tags:"
+        local str="$*"
+        while [[ "$str" =~ ([a-zA-Z_]+)=([^\"\'[:space:]]+|\"([^\"]+)\"|\'([^\']+)\') ]]; do
+            local key="${BASH_REMATCH[1]}"
+            local val="${BASH_REMATCH[4]:-${BASH_REMATCH[3]:-${BASH_REMATCH[2]}}}"
+            if [[ "$key" == "prefix" ]]; then t_prefix="$val"; fi
+            str="${str#*${BASH_REMATCH[0]}}"
+        done
+        WIKI_TAGS_HTML=""
+        local t_tags="${PAGE_VARS["page.tags"]:-${PAGE_VARS["tags"]:-${PAGE_TAGS["$pagename"]:-}}}"
+        if [[ -n "$t_tags" ]]; then
+            WIKI_TAGS_HTML="<tags>"$'\n'
+            WIKI_TAGS_HTML+="<prefix class=\"tags-prefix\">${t_prefix}</prefix>"$'\n'
+            local old_ifs="$IFS"
+            IFS=","
+            local -a tag_arr=($t_tags)
+            IFS="$old_ifs"
+            local t
+            for t in "${tag_arr[@]}"; do
+                t="${t#"${t%%[![:space:]]*}"}"
+                t="${t%"${t##*[![:space:]]}"}"
+                [[ -z "$t" ]] && continue
+                WIKI_TAGS_HTML+="<tag><a href=\"?search=tag:${t}\">${t}</a></tag>"$'\n'
+            done
+            WIKI_TAGS_HTML+="</tags>"
+        fi
+    }
+
+    __partial_related_r() {
+        local title="" args="root=/"
+        local str="$*"
+        while [[ "$str" =~ ([a-zA-Z_.-]+)=([^\"\'[:space:]]+|\"([^\"]+)\"|\'([^\']+)\') ]]; do
+            local key="${BASH_REMATCH[1]}"
+            local val="${BASH_REMATCH[4]:-${BASH_REMATCH[3]:-${BASH_REMATCH[2]}}}"
+            if [[ "$key" == "title" ]]; then
+                title="$val"
+            else
+                args+=" ${key}=\"${val}\""
+            fi
+            str="${str#*${BASH_REMATCH[0]}}"
+        done
+        local rel_val="${PAGE_VARS["page.related"]:-${PAGE_VARS["related"]:-${PAGE_RELATED["$pagename"]:-}}}"
+        [[ -n "$rel_val" ]] && args+=" ${rel_val}"
+        local out=""
+        [[ -n "$title" ]] && out+="<h1>${title}</h1>"$'\n'
+        __listing_pages_r "$args"
+        out+="$REPLY"
+        REPLY="$out"
+        return 0
+    }   
+
+    __partial_related() {
+        __partial_related_r "$@"
+        printf "%s" "$REPLY"
+    }
+        
+    __partial_head_r() {
+        local h_title="" h_css="" h_js="" h_thumb=""
+        local str="$*"
+        while [[ "$str" =~ ([a-zA-Z_.-]+)=([^\"\'[:space:]]+|\"([^\"]+)\"|\'([^\']+)\') ]]; do
+            local key="${BASH_REMATCH[1]}"
+            local val="${BASH_REMATCH[4]:-${BASH_REMATCH[3]:-${BASH_REMATCH[2]}}}"
+            [[ "$val" == page.* ]] && val="${PAGE_VARS[$val]}"
+            if [[ "$key" == "title" ]]; then h_title="$val"
+            elif [[ "$key" == "css" ]]; then h_css="$val"
+            elif [[ "$key" == "js" ]]; then h_js="$val"
+            elif [[ "$key" == "thumb" ]]; then h_thumb="$val"
+            fi
+            str="${str#*${BASH_REMATCH[0]}}"
+        done
+        if [[ -n "$h_thumb" && "$h_thumb" != http://* && "$h_thumb" != https://* && "$h_thumb" != /* ]]; then
+            h_thumb="/_assets/${h_thumb}"
+        fi
+        local out="<meta charset=\"UTF-8\">"$'\n'
+        out+="<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"$'\n'
+        out+="<title>${h_title}</title>"$'\n'
+        local -a h_css_list=()
+        IFS=',' read -ra h_css_list <<< "$h_css"
+        (( ${#h_css_list[@]} )) || h_css_list=("")
+        local h_css_item
+        for h_css_item in "${h_css_list[@]}"; do
+            out+="<link rel=\"stylesheet\" href=\"${h_css_item}\">"$'\n'
+        done
+        out+="<link rel=\"icon\" type=\"image/png\" href=\"/_static/favicon/favicon-96x96.png\" sizes=\"96x96\">"$'\n'
+        out+="<link rel=\"icon\" type=\"image/svg+xml\" href=\"/_static/favicon/favicon.svg\">"$'\n'
+        out+="<link rel=\"shortcut icon\" href=\"/_static/favicon/favicon.ico\">"$'\n'
+        out+="<link rel=\"apple-touch-icon\" sizes=\"180x180\" href=\"/_static/favicon/apple-touch-icon.png\">"$'\n'
+        out+="<meta name=\"apple-mobile-web-app-title\" content=\"ximenesyuri\">"$'\n'
+        out+="<link rel=\"manifest\" href=\"/_static/favicon/site.webmanifest\">"$'\n'
+        out+="<script type=\"module\" src=\"${h_js}\"></script>"$'\n'
+        if [[ -n "$h_thumb" ]]; then
+            out+="<meta property=\"og:title\" content=\"${h_title}\">"$'\n'
+            out+="<meta property=\"og:image\" content=\"${h_thumb}\">"$'\n'
+            out+="<meta name=\"twitter:card\" content=\"summary_large_image\">"$'\n'
+            out+="<meta name=\"twitter:title\" content=\"${h_title}\">"$'\n'
+            out+="<meta name=\"twitter:image\" content=\"${h_thumb}\">"$'\n'
+        fi
+        out+="<script>
+        window.addEventListener('hashchange', function() {
+            var m = document.getElementById('search-modal');
+            if (m) m.style.display = 'none';
+            var r = document.getElementById('search-results');
+            if (r) r.style.display = 'none';
+        });
+        document.addEventListener('DOMContentLoaded', async function() {
+            if (window.matchMedia(\"(max-width: 768px)\").matches) {
+                document.querySelectorAll('.menu-details > details[open]').forEach(function(details){
+                    details.removeAttribute('open');
+                });
+            }
+            wiki.full(true);
+        });
+    </script>"$'\n'
+        out+="</head>"
+        REPLY="$out"
+        return 0
+    }
+   
+
+    __partial_head() {
+        __partial_head_r "$@"
+        printf "%s" "$REPLY"
+    }
+
+    __partial_settings() {
+        local s_label="" s_icon="" s_content_align="" s_content_align_desc="" s_button="true"
+        local s_themes_selector="false" s_themes_path="" s_themes_desc="tema"
+        local str="$*"
+        while [[ "$str" =~ ([a-zA-Z_.-]+)=([^\"\'[:space:]]+|\"([^\"]+)\"|\'([^\']+)\') ]]; do
+            local key="${BASH_REMATCH[1]}"
+            local val="${BASH_REMATCH[4]:-${BASH_REMATCH[3]:-${BASH_REMATCH[2]}}}"
+            if [[ "$key" == "label" ]]; then s_label="$val"
+            elif [[ "$key" == "icon" ]]; then s_icon="$val"
+            elif [[ "$key" == "content_align" ]]; then s_content_align="${val,,}"
+            elif [[ "$key" == "content_align_desc" ]]; then s_content_align_desc="$val"
+            elif [[ "$key" == "button" ]]; then s_button="${val,,}"
+            elif [[ "$key" == "themes_selector" ]]; then s_themes_selector="${val,,}"
+            elif [[ "$key" == "themes_path" ]]; then s_themes_path="$val"
+            elif [[ "$key" == "themes_desc" ]]; then s_themes_desc="$val"
+            fi
+            str="${str#*${BASH_REMATCH[0]}}"
+        done
+        local btn_html=""
+        if [[ -n "$s_icon" ]]; then
+            local icon_html="$s_icon"
+            if [[ "$s_icon" == http*://*.svg ]]; then
+                icon_html="$(curl -sL "$s_icon")"
+            elif [[ "$s_icon" == *.svg ]]; then
+                if [[ -f "$s_icon" ]]; then
+                    icon_html="$(<"$s_icon")"
+                elif [[ -f "$SOURCEDIR/$s_icon" ]]; then
+                    icon_html="$(<"$SOURCEDIR/$s_icon")"
+                fi
+            else
+                icon_html="<img src=\"${s_icon}\" alt=\"icon\"/>"
+            fi
+            btn_html+="${icon_html}"
+        fi
+        if [[ -n "$s_label" ]]; then
+            btn_html+="${btn_html:+ }<span>${s_label}</span>"
+        fi
+        local tag_open="<button type=\"button\" id=\"settings-toggle\" aria-label=\"configurações\" aria-expanded=\"false\" aria-controls=\"settings-modal\">"
+        local tag_close="</button>"
+        if [[ "$s_button" == "false" ]]; then
+            tag_open="<a href=\"#\" id=\"settings-toggle\" aria-label=\"configurações\" aria-expanded=\"false\" aria-controls=\"settings-modal\">"
+            tag_close="</a>"
+        fi
+        WIKI_SETTINGS_HTML=""
+        WIKI_SETTINGS_HTML+="    ${tag_open}"$'\n'
+        WIKI_SETTINGS_HTML+="        ${btn_html}"$'\n'
+        WIKI_SETTINGS_HTML+="    ${tag_close}"$'\n'
+        WIKI_SETTINGS_HTML+="    <div id=\"settings-modal\" class=\"settings-modal\" role=\"dialog\" aria-label=\"configurações\" style=\"display: none;\">"$'\n'
+        WIKI_SETTINGS_HTML+="        <div class=\"settings-modal-content\">"$'\n'
+        if [[ "$s_content_align" == "true" ]]; then
+            WIKI_SETTINGS_HTML+="            <div class=\"settings-row\" data-setting=\"content-align\">"$'\n'
+            WIKI_SETTINGS_HTML+="                <span class=\"settings-label\" id=\"settings-content-align\">${s_content_align_desc}</span>"$'\n'
+            WIKI_SETTINGS_HTML+="                <div class=\"settings-segmented\" role=\"radiogroup\" aria-labelledby=\"settings-content-align\">"$'\n'
+            WIKI_SETTINGS_HTML+="                <button type=\"button\" role=\"radio\" data-value=\"left\" aria-label=\"à esquerda\" aria-checked=\"false\" tabindex=\"-1\">"$'\n'
+            WIKI_SETTINGS_HTML+="                    <svg viewBox=\"0 0 20 16\" width=\"20\" height=\"16\" aria-hidden=\"true\"><rect x=\"0.5\" y=\"0.5\" width=\"19\" height=\"15\" fill=\"none\" stroke=\"currentColor\"/><rect x=\"3\" y=\"4\" width=\"5\" height=\"8\" fill=\"currentColor\"/></svg>"$'\n'
+            WIKI_SETTINGS_HTML+="                </button>"$'\n'
+            WIKI_SETTINGS_HTML+="                <button type=\"button\" role=\"radio\" data-value=\"center\" aria-label=\"centralizado\" aria-checked=\"false\" tabindex=\"-1\">"$'\n'
+            WIKI_SETTINGS_HTML+="                    <svg viewBox=\"0 0 20 16\" width=\"20\" height=\"16\" aria-hidden=\"true\"><rect x=\"0.5\" y=\"0.5\" width=\"19\" height=\"15\" fill=\"none\" stroke=\"currentColor\"/><rect x=\"7.5\" y=\"4\" width=\"5\" height=\"8\" fill=\"currentColor\"/></svg>"$'\n'
+            WIKI_SETTINGS_HTML+="                </button>"$'\n'
+            WIKI_SETTINGS_HTML+="                <button type=\"button\" role=\"radio\" data-value=\"right\" aria-label=\"à direita\" aria-checked=\"false\" tabindex=\"-1\">"$'\n'
+            WIKI_SETTINGS_HTML+="                    <svg viewBox=\"0 0 20 16\" width=\"20\" height=\"16\" aria-hidden=\"true\"><rect x=\"0.5\" y=\"0.5\" width=\"19\" height=\"15\" fill=\"none\" stroke=\"currentColor\"/><rect x=\"12\" y=\"4\" width=\"5\" height=\"8\" fill=\"currentColor\"/></svg>"$'\n'
+            WIKI_SETTINGS_HTML+="                </button>"$'\n'
+            WIKI_SETTINGS_HTML+="                </div>"$'\n'
+            WIKI_SETTINGS_HTML+="            </div>"$'\n'
+        fi
+        if [[ "$s_themes_selector" == "true" ]]; then
+            WIKI_SETTINGS_HTML+="            <div class=\"settings-row\" data-setting=\"theme\">"$'\n'
+            WIKI_SETTINGS_HTML+="                <span class=\"settings-label\" id=\"settings-theme\">${s_themes_desc}</span>"$'\n'
+            WIKI_SETTINGS_HTML+="                <div class=\"settings-segmented\">"$'\n'
+            WIKI_SETTINGS_HTML+="                    <select id=\"lemma-theme-select\" data-path=\"${s_themes_path}\" aria-labelledby=\"settings-theme\" style=\"background:transparent;color:inherit;border:none;outline:none;cursor:pointer;padding:5px 7px;\"></select>"$'\n'
+            WIKI_SETTINGS_HTML+="                </div>"$'\n'
+            WIKI_SETTINGS_HTML+="            </div>"$'\n'
+            if [[ -n "$s_themes_path" ]]; then
+                local abs_themes_path="$s_themes_path"
+                if [[ "$s_themes_path" == /* ]]; then
+                    abs_themes_path="${BUILDDIR}${s_themes_path}"
+                    [[ ! -f "$abs_themes_path" && -n "${STATICDIR:-}" && "$s_themes_path" == "/_static/"* ]] && abs_themes_path="${STATICDIR}/${s_themes_path#/_static/}"
+                else
+                    abs_themes_path="${SOURCEDIR}/${s_themes_path}"
+                fi
+                if [[ -f "$abs_themes_path" ]]; then
+                    local themes_json
+                    themes_json="$(<"$abs_themes_path")"
+                    WIKI_SETTINGS_HTML+="            <script id=\"lemma-themes-data\" type=\"application/json\">${themes_json}</script>"$'\n'
+                fi
+            fi
+        fi
+        WIKI_SETTINGS_HTML+="        </div>"$'\n'
+        WIKI_SETTINGS_HTML+="    </div>"$'\n'
+    }
+
+    __partial_help() {
+        local h_button="" h_label="" h_icon=""
+        local -a keys=()
+        local -A descs=()
+        local str="$*"
+
+        while [[ "$str" =~ ([a-zA-Z0-9_.\?/><-]+)=([^\"\'[:space:]]+|\"([^\"]+)\"|\'([^\']+)\') ]]; do
+            local key="${BASH_REMATCH[1]}"
+            local val="${BASH_REMATCH[4]:-${BASH_REMATCH[3]:-${BASH_REMATCH[2]}}}"
+
+            case "$key" in
+                button) h_button="${val,,}" ;;
+                label)  h_label="$val" ;;
+                icon)   h_icon="$val" ;;
+                *)      keys+=("$key"); descs["$key"]="$val" ;;
+            esac
+            str="${str#*${BASH_REMATCH[0]}}"
+        done
+        local btn_html=""
+        if [[ -n "$h_icon" ]]; then
+            if [[ "$h_icon" == http*://*.svg ]]; then
+                btn_html="$(curl -sL "$h_icon")"
+            elif [[ "$h_icon" == *.svg ]]; then
+                if [[ -f "$h_icon" ]]; then
+                    btn_html="$(<"$h_icon")"
+                elif [[ -f "$SOURCEDIR/$h_icon" ]]; then
+                    btn_html="$(<"$SOURCEDIR/$h_icon")"
+                fi
+            else
+                btn_html="<img src=\"${h_icon}\" alt=\"icon\"/>"
+            fi
+        fi
+        [[ -n "$h_label" ]] && btn_html+="${btn_html:+ }<span>${h_label}</span>"
+        WIKI_HELP_HTML=""
+
+        if [[ "$h_button" == "true" || "$h_button" == "1" ]]; then
+            WIKI_HELP_HTML+="    <button type=\"button\" id=\"help-toggle\" aria-label=\"help\" aria-expanded=\"false\" aria-controls=\"help-modal\">"$'\n'
+            WIKI_HELP_HTML+="        ${btn_html}"$'\n'
+            WIKI_HELP_HTML+="    </button>"$'\n'
+        else
+            WIKI_HELP_HTML+="    <a href=\"#\" id=\"help-toggle\" aria-label=\"help\" aria-expanded=\"false\" aria-controls=\"help-modal\">"$'\n'
+            WIKI_HELP_HTML+="        ${btn_html}"$'\n'
+            WIKI_HELP_HTML+="    </a>"$'\n'
+        fi
+        WIKI_HELP_HTML+="    <div id=\"help-modal\" class=\"help-modal\" role=\"dialog\" aria-label=\"help\" style=\"display: none;\">"$'\n'
+        WIKI_HELP_HTML+="        <div class=\"help-modal-content\">"$'\n'
+
+        local k
+        for k in "${keys[@]}"; do
+            WIKI_HELP_HTML+="            <div class=\"help-row\">"$'\n'
+            WIKI_HELP_HTML+="                <span class=\"help-label\"><inline>${k}</inline></span>"$'\n'
+            WIKI_HELP_HTML+="                <span>${descs[$k]}</span>"$'\n'
+            WIKI_HELP_HTML+="            </div>"$'\n'
+        done
+
+        WIKI_HELP_HTML+="        </div>"$'\n'
+        WIKI_HELP_HTML+="    </div>"$'\n'
+    }
+}

@@ -1,0 +1,2113 @@
+#! /bin/bash
+
+__blocks__() {
+    
+    __block_core() {
+        local bname="$1"
+        local -n buffer_ref="$2"
+        local -a BLOCK_KEYS=()
+        local -A BLOCK_VALS=()
+        local current_key="" current_val="" b_line l_trim r_trim inner after_col k_part v_part
+        local nested_depth=0
+        for b_line in "${buffer_ref[@]}"; do
+            l_trim="${b_line#"${b_line%%[![:space:]]*}"}"
+            if [[ "$l_trim" == "::"* ]]; then
+                after_col="${l_trim#::}"
+                if [[ "$after_col" == [[:blank:]]* ]]; then
+                    after_col="${after_col:1}"
+                fi
+                local sub_trim="${after_col#"${after_col%%[![:space:]]*}"}"
+                if [[ "$sub_trim" == "{{"*"}}"* ]]; then
+                    l_trim="$sub_trim"
+                fi
+            fi
+            if [[ "$l_trim" == "{{"*"}}"* ]]; then
+                r_trim="${l_trim%"${l_trim##*[![:space:]]}"}"
+                if [[ "$r_trim" == "{{"*"}}" ]]; then
+                    inner="${r_trim#\{\{}"
+                    inner="${inner%\}\}}"
+                    inner="${inner#"${inner%%[![:space:]]*}"}"
+                    inner="${inner%"${inner##*[![:space:]]}"}"
+                    if [[ "$inner" == "block.end" ]]; then
+                        (( nested_depth > 0 )) && (( nested_depth-- ))
+                    elif [[ "$inner" == block.* ]]; then
+                        (( nested_depth++ ))
+                    fi
+                fi
+            fi
+            if (( nested_depth == 0 )) && [[ "$l_trim" == "::"* ]]; then
+                after_col="${l_trim#::}"
+                after_col="${after_col#"${after_col%%[![:space:]]*}"}"
+                if [[ "$after_col" == *:* ]]; then
+                    k_part="${after_col%%:*}"
+                    if [[ -n "$k_part" && -z "${k_part//[a-zA-Z0-9_-]/}" ]]; then
+                        if [[ -n "$current_key" ]]; then
+                            BLOCK_VALS["$current_key"]="$current_val"
+                            BLOCK_KEYS+=("$current_key")
+                        fi
+                        current_key="$k_part"
+                        v_part="${after_col#*:}"
+                        v_part="${v_part#"${v_part%%[![:space:]]*}"}"
+                        v_part="${v_part%"${v_part##*[![:space:]]}"}"
+                        current_val="$v_part"
+                        continue
+                    fi
+                fi
+            fi
+            if [[ -n "$current_key" ]]; then
+                current_val+=$'\n'"$b_line"
+            fi
+        done
+        if [[ -n "$current_key" ]]; then
+            BLOCK_VALS["$current_key"]="$current_val"
+            BLOCK_KEYS+=("$current_key")
+        fi
+        local -A BLOCK_DISPLAY_KEYS=()
+        local -A BLOCK_DISPLAY_VALS=()
+        local k
+        for k in "${BLOCK_KEYS[@]}"; do
+            BLOCK_DISPLAY_KEYS["$k"]="$k"
+            BLOCK_DISPLAY_VALS["$k"]="${BLOCK_VALS[$k]}"
+        done
+        local SKIP_DEFAULT_REFS=0
+        if [[ "$bname" == "def" ]]; then
+            __block_def_hook
+        elif declare -F "__block_${bname}_hook" >/dev/null; then
+            "__block_${bname}_hook"
+        fi
+        local block_entry="${BLOCK_VALS[__entry__]:-}"
+        local block_context="${BLOCK_VALS[__context__]:-}"
+        local first_content_key="" first_content_val=""
+        if [[ -n "${BLOCK_VALS[term]:-}" ]]; then
+            first_content_key="term"
+            first_content_val="${BLOCK_VALS[term]}"
+        elif [[ -n "${BLOCK_VALS[type]:-}" ]]; then
+            first_content_key="type"
+            first_content_val="${BLOCK_VALS[type]}"
+        else
+            for k in "${BLOCK_KEYS[@]}"; do
+                if [[ "$k" != "__id__" && "$k" != "__context__" && "$k" != "context" && "$k" != "__entry__" && "$k" != "__refs__" ]]; then
+                    first_content_key="$k"
+                    first_content_val="${BLOCK_VALS[$k]}"
+                    break
+                fi
+            done
+        fi
+        local raw_id="${BLOCK_VALS[__id__]:-}"
+        if [[ -z "$raw_id" ]]; then
+            raw_id="${block_entry:-${first_content_val}}"
+        fi
+        if [[ -z "$raw_id" && ${#BLOCK_KEYS[@]} -gt 0 ]]; then
+            raw_id="${BLOCK_VALS[${BLOCK_KEYS[0]}]}"
+        fi
+        local clean_id=""
+        __slugify_r "$raw_id"
+        clean_id="$REPLY"
+        [[ -z "$clean_id" ]] && clean_id="rnd-$RANDOM"
+        local ref_key="$clean_id"
+        if [[ -n "$block_context" && "$raw_id" != *.* ]]; then
+            __slugify_r "${block_context}.${raw_id}"
+            ref_key="$REPLY"
+        fi
+        local anchor_id_slug="${ref_key//[\/.]/-}"
+        local anchor_id="block-${bname}-${anchor_id_slug}"
+        local BLOCK_ID="$clean_id"
+        local BLOCK_TITLE="${block_entry:-${first_content_val:-$raw_id}}"
+        if (( SKIP_DEFAULT_REFS == 0 )) && [[ -n "$w_name" ]]; then
+            WIKI_REFS["${bname}::${ref_key}"]="${pagename}:${anchor_id}"
+            WIKI_REFS["${w_name}::${ENV:-}::${bname}::${ref_key}"]="${pagename}:${anchor_id}"
+        fi
+        if [[ -n "${BLOCK_VALS[__context__]:-}" ]]; then
+            local first_dk=""
+            for k in "${BLOCK_KEYS[@]}"; do
+                if [[ -n "${BLOCK_DISPLAY_KEYS[$k]:-}" && "$k" != "__id__" && "$k" != "__context__" && "$k" != "__entry__" && "$k" != "__refs__" ]]; then
+                    first_dk="$k"
+                    break
+                fi
+            done
+            if [[ -n "$first_dk" ]]; then
+                BLOCK_DISPLAY_VALS["$first_dk"]+=" <span class=\"def-context\">(${BLOCK_VALS[__context__]})</span>"
+            fi
+        fi
+        local -a html_parts=(
+            "<block id=\"${anchor_id}\" class=\"block-${bname}\">"
+            "    <fields id=\"fields-${bname}-${anchor_id_slug}\" class=\"fields-${bname}\">"
+        )
+        __json_escape_r "/${pagename//./\/}.html#${anchor_id}"
+        local -a json_parts=("{\"url\":\"$REPLY\"")
+        if [[ -n "${BLOCK_VALS[__context__]:-}" ]]; then
+            __json_escape_r "${BLOCK_VALS[__context__]}"
+            json_parts+=(",\"__context__\":\"$REPLY\"")
+        fi
+        for k in "${BLOCK_KEYS[@]}"; do
+            [[ "$k" == "__id__" || "$k" == "__context__" || "$k" == "__entry__" ]] && continue
+            local v="${BLOCK_VALS[$k]}"
+            __json_escape_r "$v"
+            json_parts+=(",\"${k}\":\"$REPLY\"")
+            local dk="${BLOCK_DISPLAY_KEYS[$k]:-}"
+            [[ -z "$dk" ]] && continue
+            local dv="${BLOCK_DISPLAY_VALS[$k]}"
+            if [[ "$k" == "__refs__" || "$dk" == "__refs__" ]]; then
+                local prefix_name="refs"
+                [[ "$k" != "__refs__" ]] && prefix_name="$k"
+                local -a rel_parts=("<ul>")
+                set -f
+                local OIFS="$IFS"; IFS=','
+                local -a r_items=($dv)
+                IFS="$OIFS"
+                set +f
+                local r_item r_topic r_ref slug_ref
+                for r_item in "${r_items[@]}"; do
+                    r_item="${r_item#"${r_item%%[![:space:]]*}"}"; r_item="${r_item%"${r_item##*[![:space:]]}"}"
+                    if [[ -n "$r_item" ]]; then
+                        r_topic="${r_item%%.*}"
+                        r_ref="${r_item#*.}"
+                        __slugify_r "$r_ref"
+                        slug_ref="$REPLY"
+                        if [[ "$r_topic" == "page" ]]; then
+                            rel_parts+=("        <li><a href=\"/${slug_ref//./\/}.html\">${r_ref}</a></li>")
+                        else
+                            rel_parts+=("        <li>%%WIKI_REF:${r_topic}:${slug_ref}:${r_ref}%%</li>")
+                        fi
+                    fi
+                done
+                rel_parts+=("    </ul>")
+                local OIFS="$IFS"; IFS=$'\n'; dv="${rel_parts[*]}"; IFS="$OIFS"
+                dk="$prefix_name"
+            elif [[ "${BLOCK_VALS[$k]}" == "$dv" ]]; then
+                __parse_block_field_r "$dv"; dv="$REPLY"
+            fi
+            html_parts+=(
+                "        <field id=\"field-${bname}-${dk}-${anchor_id_slug}\" class=\"field-${bname}-${dk}\">"
+                "            <prefix id=\"prefix-${bname}-${dk}-${anchor_id_slug}\" class=\"prefix-${bname}-${dk}\">${dk}: </prefix><div id=\"text-${bname}-${dk}-${anchor_id_slug}\" class=\"text-prefix-${bname}-${dk}\">${dv}</div>"
+                "        </field>"
+            )
+        done
+        html_parts+=("    </fields>" "</block>")
+        json_parts+=("},"$'\n')
+        local old_ifs="$IFS"
+        IFS=""
+        SEARCH_INDEX_MAP["$bname"]+="${json_parts[*]}"
+        IFS=$'\n'
+        content+="${html_parts[*]}"$'\n'
+        IFS="$old_ifs"
+        if [[ -z "${PAGE_TITLE_KEYS[$bname]:-}" ]]; then
+            PAGE_TITLE_KEYS["$bname"]="${first_content_key:-${BLOCK_KEYS[0]}}"
+        fi
+        LIST_HTML_MAP["$bname"]+="<li><a href=\"#${anchor_id}\">${BLOCK_TITLE}</a></li>"$'\n'
+    }
+
+    
+    __block_quote() {
+        local bname="$1"
+        local -n my_buffer="$2"
+        if (( ${#my_buffer[@]} == 0 )); then return; fi
+
+        local b_id="rnd-$RANDOM"
+        local b_width="" b_style="" q_cite=""
+        local q_text="" current_key="" current_val="" b_line l_trim after_col k_part v_part
+
+        for b_line in "${my_buffer[@]}"; do
+            l_trim="${b_line#"${b_line%%[![:space:]]*}"}"
+            if [[ "$l_trim" == "::"* ]]; then
+                after_col="${l_trim#::}"
+                after_col="${after_col#"${after_col%%[![:space:]]*}"}"
+                if [[ "$after_col" == *:* ]]; then
+                    k_part="${after_col%%:*}"
+                    if [[ -n "$k_part" && -z "${k_part//[a-zA-Z0-9_-]/}" ]]; then
+                        if [[ -n "$current_key" ]]; then
+                            case "$current_key" in
+                                __id__) b_id="$current_val" ;;
+                                __width__) b_width="$current_val" ;;
+                                __style__) b_style="$current_val" ;;
+                                cite) q_cite="$current_val" ;;
+                                text) q_text="${q_text:+$q_text$'\n'}$current_val" ;;
+                            esac
+                        fi
+                        current_key="$k_part"
+                        v_part="${after_col#*:}"
+                        v_part="${v_part#"${v_part%%[![:space:]]*}"}"
+                        v_part="${v_part%"${v_part##*[![:space:]]}"}"
+                        current_val="$v_part"
+                        continue
+                    fi
+                fi
+            fi
+            if [[ -n "$current_key" ]]; then
+                current_val+=$'\n'"$b_line"
+            else
+                q_text+="${q_text:+$'\n'}$b_line"
+            fi
+        done
+
+        if [[ -n "$current_key" ]]; then
+            case "$current_key" in
+                __id__) b_id="$current_val" ;;
+                __width__) b_width="$current_val" ;;
+                __style__) b_style="$current_val" ;;
+                cite) q_cite="$current_val" ;;
+                text) q_text="${q_text:+$q_text$'\n'}$current_val" ;;
+            esac
+        fi
+
+        q_text="${q_text#"${q_text%%[![:space:]]*}"}"
+        q_text="${q_text%"${q_text##*[![:space:]]}"}"
+
+        __parse_block_field_r "$q_text"; q_text="$REPLY"
+        __get_style_attr_r "$b_width" "$b_style"
+        local style_attr="$REPLY"
+        local cite_attr=""
+        [[ -n "$q_cite" ]] && cite_attr=" cite=\"${q_cite}\""
+
+        content+="<blockquote id=\"block-quote-${b_id}\" class=\"block-quote\"${style_attr}${cite_attr}>"$'\n'"    ${q_text}"$'\n'"</blockquote>"$'\n'
+    }    
+
+    __block_def_hook() {
+        if [[ -n "${BLOCK_DISPLAY_KEYS[term]:-}" ]]; then
+            BLOCK_DISPLAY_KEYS["term"]="def"
+            BLOCK_DISPLAY_VALS["term"]="<u>${BLOCK_VALS[term]}</u>"
+        fi
+        if [[ -n "${BLOCK_VALS[context]:-}" ]]; then
+            BLOCK_VALS["__context__"]="${BLOCK_VALS[context]}"
+            BLOCK_DISPLAY_KEYS["context"]=""
+        fi
+        local def_ctx="${BLOCK_VALS[__context__]:-}"
+        local self_raw="${BLOCK_VALS[__id__]:-${BLOCK_VALS[__entry__]:-${BLOCK_VALS[term]:-}}}"
+        local self_slug=""
+        if [[ -n "$self_raw" ]]; then
+            if [[ -n "$def_ctx" && "$self_raw" != *.* ]]; then
+                __slugify_r "${def_ctx}.${self_raw}"
+            else
+                __slugify_r "$self_raw"
+            fi
+            self_slug="$REPLY"
+        fi
+        if [[ -z "${BLOCK_VALS[related]:-}" && -z "${BLOCK_VALS[__refs__]:-}" ]]; then
+            local text_to_scan="${BLOCK_VALS[idea]:-}"$'\n'"${BLOCK_VALS[details]:-}"
+            if [[ "$text_to_scan" == *"{{"*":"*"}}"* ]]; then
+                local extracted_refs=""
+                local -A seen_refs=()
+                local rem="$text_to_scan" inner t_topic t_rest t_ref full_ref ref_slug
+                while [[ "$rem" == *"{{"*"}}"* ]]; do
+                    rem="${rem#*\{\{}"
+                    inner="${rem%%\}\}*}"
+                    rem="${rem#*\}\}}"
+                    if [[ "$inner" == *:* ]]; then
+                        inner="${inner#"${inner%%[![:space:]]*}"}"
+                        inner="${inner%"${inner##*[![:space:]]}"}"
+                        t_topic="${inner%%:*}"
+                        if [[ -n "$t_topic" && -z "${t_topic//[a-zA-Z0-9_-]/}" && "$t_topic" != "page" && "$t_topic" != "block" ]]; then
+                            t_rest="${inner#*:}"
+                            t_ref="${t_rest%%:*}"
+                            t_ref="${t_ref#"${t_ref%%[![:space:]]*}"}"
+                            t_ref="${t_ref%"${t_ref##*[![:space:]]}"}"
+                            if [[ -n "$t_ref" ]]; then
+                                if [[ "$t_topic" == "def" && -n "$def_ctx" && "$t_ref" != *.* ]]; then
+                                    t_ref="${def_ctx}.${t_ref}"
+                                fi
+                                __slugify_r "$t_ref"
+                                ref_slug="$REPLY"
+                                [[ "$t_topic" == "def" && -n "$self_slug" && "$ref_slug" == "$self_slug" ]] && continue
+                                full_ref="${t_topic}.${t_ref}"
+                                if [[ -z "${seen_refs[$full_ref]:-}" ]]; then
+                                    seen_refs["$full_ref"]=1
+                                    extracted_refs+="${extracted_refs:+, }${full_ref}"
+                                fi
+                            fi
+                        fi
+                    fi
+                done
+                if [[ -n "$extracted_refs" ]]; then
+                    BLOCK_VALS["related"]="$extracted_refs"
+                    if [[ -z "${BLOCK_DISPLAY_KEYS[related]:-}" ]]; then
+                        BLOCK_KEYS+=("related")
+                    fi
+                    BLOCK_DISPLAY_KEYS["related"]="related"
+                    BLOCK_DISPLAY_VALS["related"]="$extracted_refs"
+                fi
+            fi
+        fi
+        if [[ -n "${BLOCK_VALS[related]:-}" ]]; then
+            local new_rel=""
+            set -f
+            local OIFS="$IFS"; IFS=','
+            local -a r_items=(${BLOCK_VALS[related]})
+            IFS="$OIFS"
+            set +f
+            local r_item
+            for r_item in "${r_items[@]}"; do
+                r_item="${r_item#"${r_item%%[![:space:]]*}"}"; r_item="${r_item%"${r_item##*[![:space:]]}"}"
+                if [[ -n "$r_item" ]]; then
+                    if [[ "$r_item" != *.*.* && "$r_item" != def.* ]]; then
+                        new_rel+="${new_rel:+, }def.${r_item}"
+                    else
+                        new_rel+="${new_rel:+, }${r_item}"
+                    fi
+                fi
+            done
+            BLOCK_DISPLAY_VALS["related"]="$new_rel"
+            BLOCK_DISPLAY_KEYS["related"]="__refs__"
+        fi
+    }
+    
+
+    __block_def() {
+        __block_core "$1" "$2"
+    }    
+
+    __block_table() {
+        if [[ ${#table_buffer[@]} -lt 3 ]]; then return; fi
+        local sep_indices=() i tmp clean_tmp
+        for (( i=0; i<${#table_buffer[@]}; i++ )); do
+            tmp="${table_buffer[$i]}"
+            tmp="${tmp//$'\t'/    }"
+            tmp="${tmp//[[:cntrl:]]/}"
+            tmp="${tmp//$'\xC2\xA0'/ }"
+            tmp="${tmp//$'\xA0'/ }"
+            table_buffer[$i]="$tmp"
+            clean_tmp="${tmp// /}"
+            if [[ -n "$clean_tmp" && -z "${clean_tmp//[-=_]/}" ]]; then
+                sep_indices+=($i)
+            fi
+        done
+        if [[ ${#sep_indices[@]} -lt 1 ]]; then return; fi
+        local sep1=${sep_indices[0]} sep2=${#table_buffer[@]} caption_line=""
+        if [[ ${#sep_indices[@]} -ge 2 ]]; then
+            sep2=${sep_indices[${#sep_indices[@]}-1]}
+            for (( i=sep2+1; i<${#table_buffer[@]}; i++ )); do
+                local cl="${table_buffer[$i]}"
+                cl="${cl#"${cl%%[! ]*}"}"; cl="${cl%"${cl##*[! ]}"}"
+                if [[ -n "$cl" ]]; then caption_line="$cl"; break; fi
+            done
+        fi
+        local header_line="${table_buffer[0]}"
+        header_line="${header_line#"${header_line%%[! ]*}"}"
+        header_line="${header_line%"${header_line##*[! ]}"}"
+        local sep=$'\x1F'
+        local h_tmp="${header_line//  /$sep}"
+        while [[ "$h_tmp" == *$sep' '* ]]; do h_tmp="${h_tmp//$sep' '/$sep}"; done
+        while [[ "$h_tmp" == *' '$sep* ]]; do h_tmp="${h_tmp//' '$sep/$sep}"; done
+        while [[ "$h_tmp" == *$sep$sep* ]]; do h_tmp="${h_tmp//$sep$sep/$sep}"; done
+        local IFS="$sep"
+        local -a headers=()
+        read -ra headers <<< "$h_tmp"
+        IFS=$' \t\n'
+        local num_columns=${#headers[@]}
+        if [[ $num_columns -eq 0 ]]; then return; fi
+        local -a max_widths=()
+        local j
+        for (( j=0; j<num_columns; j++ )); do
+            __char_len "${headers[$j]}"; max_widths[$j]=$REPLY
+        done
+        local -a parsed_rows=()
+        for (( i=sep1+1; i<sep2; i++ )); do
+            local row_str="${table_buffer[$i]}"
+            row_str="${row_str#"${row_str%%[! ]*}"}"; row_str="${row_str%"${row_str##*[! ]}"}"
+            if [[ -z "$row_str" ]]; then continue; fi
+            local r_tmp="${row_str//  /$sep}"
+            while [[ "$r_tmp" == *$sep' '* ]]; do r_tmp="${r_tmp//$sep' '/$sep}"; done
+            while [[ "$r_tmp" == *' '$sep* ]]; do r_tmp="${r_tmp//' '$sep/$sep}"; done
+            while [[ "$r_tmp" == *$sep$sep* ]]; do r_tmp="${r_tmp//$sep$sep/$sep}"; done
+            parsed_rows+=("$r_tmp")
+            local -a cols=()
+            local IFS="$sep"
+            read -ra cols <<< "$r_tmp"
+            IFS=$' \t\n'
+            if [[ ${#cols[@]} -gt num_columns ]]; then
+                local last_col="${cols[num_columns-1]}"
+                local k
+                for (( k=num_columns; k<${#cols[@]}; k++ )); do
+                    last_col+=" ${cols[k]}"
+                done
+                cols[num_columns-1]="$last_col"
+            fi
+            for (( j=0; j<num_columns; j++ )); do
+                __char_len "${cols[$j]}"; local flen=$REPLY
+                if (( flen > max_widths[j] )); then
+                    max_widths[$j]=$flen
+                fi
+            done
+        done
+        ((page_table_count++))
+        local table_id="table-${page_table_count}"
+        local _dash_pool="--------------------------------------------------------------------------------------------------------------------------------"
+        local sep_row_html="<tr class=\"ascii-separator\">"
+        for (( j=0; j<num_columns; j++ )); do
+            local f_len=$(( max_widths[j] + 4 ))
+            while (( ${#_dash_pool} < f_len )); do _dash_pool+="$_dash_pool"; done
+            sep_row_html+="<td><p>${_dash_pool:0:f_len}</p></td>"
+        done
+        sep_row_html+="</tr>"$'\n'
+
+        local table_html="<div id=\"${table_id}\" class=\"captioned-table\">"$'\n'"<table class=\"custom-pre-table\">"$'\n'
+        table_html+="<thead>"$'\n'"<tr>"
+        local field temp_line
+        for (( j=0; j<num_columns; j++ )); do
+            field="${headers[$j]}"
+            field="${field#"${field%%[! ]*}"}"; field="${field%"${field##*[! ]}"}"
+            temp_line="$line"
+            line="$field"
+            line="${line//&/&amp;}"; line="${line//</&lt;}"; line="${line//>/&gt;}"
+            line="${line//_/$'\x1E'}"
+            __parse_inline
+            line="${line//$'\x1E'/_}"
+            field="$line"
+            line="$temp_line"
+            table_html+="<th><p>${field}</p></th>"
+        done
+        table_html+="</tr>"$'\n'"</thead>"$'\n'"<tbody>"$'\n'
+        table_html+="$sep_row_html"
+        local r_tmp
+        for r_tmp in "${parsed_rows[@]}"; do
+            local -a cols=()
+            local IFS="$sep"
+            read -ra cols <<< "$r_tmp"
+            IFS=$' \t\n'
+            if [[ ${#cols[@]} -gt num_columns ]]; then
+                local last_col="${cols[num_columns-1]}"
+                local k
+                for (( k=num_columns; k<${#cols[@]}; k++ )); do
+                    last_col+=" ${cols[k]}"
+                done
+                cols[num_columns-1]="$last_col"
+            fi
+            table_html+="<tr>"
+            for (( j=0; j<num_columns; j++ )); do
+                field="${cols[$j]:-}"
+                field="${field#"${field%%[! ]*}"}"; field="${field%"${field##*[! ]}"}"
+                temp_line="$line"
+                line="$field"
+                line="${line//&/&amp;}"; line="${line//</&lt;}"; line="${line//>/&gt;}"
+                line="${line//_/$'\x1E'}"
+                __parse_inline
+                line="${line//$'\x1E'/_}"
+                field="$line"
+                line="$temp_line"
+                table_html+="<td><p>${field}</p></td>"
+            done
+            table_html+="</tr>"$'\n'
+        done
+        if [[ ${#sep_indices[@]} -ge 2 ]]; then
+            table_html+="$sep_row_html"
+        fi
+        table_html+="</tbody>"$'\n'"</table>"$'\n'
+        if [[ -n "$caption_line" ]]; then
+            caption_line="${caption_line//&/&amp;}"
+            caption_line="${caption_line//</&lt;}"
+            caption_line="${caption_line//>/&gt;}"
+            table_html+="<p><a href=\"#\" class=\"table-caption\">${caption_line}</a></p>"$'\n'
+        fi
+        table_html+="</div>"$'\n'
+        __json_escape_r "/${pagename//./\/}.html"; local enc_url="$REPLY"
+        __json_escape_r "$header_line"; local enc_headers="$REPLY"
+        __json_escape_r "${table_buffer[*]}"; local enc_lines="$REPLY"
+        SEARCH_INDEX_MAP["table"]+="{\"url\":\"$enc_url\",\"headers\":\"$enc_headers\",\"columns\":\"$num_columns\",\"lines\":\"$enc_lines\"},"$'\n'
+        LIST_HTML_MAP["table"]+="<li><a href=\"#${table_id}\">${caption_line:-Table ${page_table_count}}</a></li>"$'\n'
+        content+="${table_html}"
+    }   
+
+    
+    __block_diagram() {
+        if (( ${#diagram_buffer[@]} == 0 )); then return; fi
+        local -A terms=() nodes_border=() nodes_bg=() nodes_class=() nodes_text=() nodes_w=() nodes_h=()
+        local -a arrows_name=() arrows_src=() arrows_tgt=() arrows_type=() arrows_style=()
+        local min_x=999999 min_y=999999 max_x=-999999 max_y=-999999
+        local line old_ifs="$IFS"
+        for line in "${diagram_buffer[@]}"; do
+            if [[ "$line" =~ ^[[:space:]]*::[[:space:]]*(node|term)[[:space:]]*:?[[:space:]]*([^,]+)(,(.*))?$ ]]; then
+                local name="${BASH_REMATCH[2]}"
+                name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
+                local props_str="${BASH_REMATCH[4]}"
+                local x=0 y=0 border="rounded" bg="default" n_class="" n_text=""
+                local x_set=0 y_set=0
+                if [[ -n "$props_str" ]]; then
+                    if [[ "$props_str" =~ text=[\"\']([^\"\']+)[\"\'] ]]; then
+                        n_text="${BASH_REMATCH[1]}"
+                        props_str="${props_str//"${BASH_REMATCH[0]}"/}"
+                    fi
+                    set -f
+                    IFS=','
+                    local -a props_array=($props_str)
+                    IFS="$old_ifs"
+                    set +f
+                    local token
+                    for token in "${props_array[@]}"; do
+                        token="${token#"${token%%[![:space:]]*}"}"; token="${token%"${token##*[![:space:]]}"}"
+                        [[ -z "$token" ]] && continue
+                        if [[ "$token" =~ ^x=(-?[0-9]+)$ ]]; then x="${BASH_REMATCH[1]}"; x_set=1
+                        elif [[ "$token" =~ ^y=(-?[0-9]+)$ ]]; then y="${BASH_REMATCH[1]}"; y_set=1
+                        elif [[ "$token" =~ ^(-?[0-9]+)$ ]]; then
+                            if (( x_set == 0 )); then x="${BASH_REMATCH[1]}"; x_set=1
+                            elif (( y_set == 0 )); then y="${BASH_REMATCH[1]}"; y_set=1; fi
+                        elif [[ "$token" == border=* ]]; then border="${token#border=}"
+                        elif [[ "$token" == bg=* ]]; then bg="${token#bg=}"
+                        elif [[ "$token" == class=* ]]; then n_class="${token#class=}"
+                        elif [[ "$token" == text=* ]]; then
+                            n_text="${token#text=}"
+                            n_text="${n_text%\"}"; n_text="${n_text#\"}"
+                            n_text="${n_text%\'}"; n_text="${n_text#\'}"
+                        fi
+                    done
+                fi
+                terms["$name"]="${x},${y}"
+                nodes_border["$name"]="$border"
+                nodes_bg["$name"]="$bg"
+                nodes_class["$name"]="$n_class"
+                nodes_text["$name"]="$n_text"
+                (( x < min_x )) && min_x=$x
+                (( x > max_x )) && max_x=$x
+                (( y < min_y )) && min_y=$y
+                (( y > max_y )) && max_y=$y
+            elif [[ "$line" =~ ^[[:space:]]*::[[:space:]]*(arrow|2-arrow)[[:space:]]*:?[[:space:]]*(.*)$ ]]; then
+                local a_type="${BASH_REMATCH[1]}"
+                local a_content="${BASH_REMATCH[2]}"
+                set -f
+                IFS=','
+                local -a tokens=($a_content)
+                IFS="$old_ifs"
+                set +f
+                local -a positional=()
+                local -a prop_tokens=()
+                local token
+                for token in "${tokens[@]}"; do
+                    token="${token#"${token%%[![:space:]]*}"}"; token="${token%"${token##*[![:space:]]}"}"
+                    [[ -z "$token" ]] && continue
+                    if [[ "$token" == *=* || "$token" == "dotted" || "$token" == "dashed" || "$token" == "wavy" || "$token" == "tilded" ]]; then
+                        prop_tokens+=("$token")
+                    else
+                        positional+=("$token")
+                    fi
+                done
+                local a_name="" src="" tgt=""
+                if (( ${#positional[@]} >= 3 )); then
+                    a_name="${positional[0]}"; src="${positional[1]}"; tgt="${positional[2]}"
+                elif (( ${#positional[@]} == 2 )); then
+                    a_name="${a_type}_${#arrows_src[@]}"; src="${positional[0]}"; tgt="${positional[1]}"
+                elif (( ${#positional[@]} == 1 )); then
+                    a_name="${positional[0]}"
+                else
+                    a_name="${a_type}_${#arrows_src[@]}"
+                fi
+                local a_format="normal" a_angle="45" a_color="" a_label="" a_label_pos="above" a_size="" a_class="" l_style="continuous"
+                for token in "${prop_tokens[@]}"; do
+                    if [[ "$token" == style=* ]]; then l_style="${token#style=}"
+                    elif [[ "$token" == format=* ]]; then a_format="${token#format=}"
+                    elif [[ "$token" == angle=* ]]; then a_angle="${token#angle=}"
+                    elif [[ "$token" == color=* ]]; then a_color="${token#color=}"
+                    elif [[ "$token" == class=* ]]; then a_class="${token#class=}"
+                    elif [[ "$token" == source=* ]]; then src="${token#source=}"
+                    elif [[ "$token" == s=* ]]; then src="${token#s=}"
+                    elif [[ "$token" == target=* ]]; then tgt="${token#target=}"
+                    elif [[ "$token" == t=* ]]; then tgt="${token#t=}"
+                    elif [[ "$token" =~ ^size=([0-9]*\.?[0-9]+)$ ]]; then a_size="${BASH_REMATCH[1]}"
+                    elif [[ "$token" == "label=^"* ]]; then a_label="${token#label=^}"; a_label_pos="above"
+                    elif [[ "$token" == "label=_"* ]]; then a_label="${token#label=_}"; a_label_pos="below"
+                    elif [[ "$token" == label=* ]]; then a_label="${token#label=}"; a_label_pos="above"
+                    elif [[ "$token" == "dotted" || "$token" == "dashed" || "$token" == "wavy" || "$token" == "tilded" ]]; then
+                        l_style="$token"
+                        [[ "$token" == "tilded" ]] && l_style="wavy"
+                    fi
+                done
+                [[ "$a_format" == "diag" || "$a_format" == "diagonal" ]] && a_format="straight"
+                if [[ -z "$a_size" ]]; then
+                    if [[ "$a_type" == "2-arrow" ]]; then a_size="0.6"; else a_size="0.9"; fi
+                fi
+                arrows_name+=("$a_name")
+                arrows_src+=("$src")
+                arrows_tgt+=("$tgt")
+                arrows_type+=("$a_type")
+                arrows_style+=("${l_style}:${a_format}:${a_angle}:${a_color}:${a_label_pos}:${a_size}:${a_class}:${a_label}")
+            fi
+        done
+        if (( ${#terms[@]} == 0 )); then return; fi
+        local GRID_X=90 GRID_Y=70 PADDING=80
+        local -A node_tspans=()
+        local term
+        for term in "${!terms[@]}"; do
+            local coords="${terms[$term]}"
+            local tx=${coords%,*} ty=${coords#*,}
+            local px=$(( (tx - min_x) * GRID_X + PADDING ))
+            local py=$(( (ty - min_y) * GRID_Y + PADDING ))
+            terms["$term"]="${px},${py}"
+            local display_text="${nodes_text[$term]:-$term}"
+            local -a text_lines=()
+            if [[ "$display_text" == *"\\n"* ]]; then
+                local split_tmp="${display_text//\\n/$'\x02'}"
+                set -f
+                IFS=$'\x02'
+                text_lines=($split_tmp)
+                IFS="$old_ifs"
+                set +f
+            else
+                text_lines=("$display_text")
+            fi
+            local max_len=0 l_str
+            for l_str in "${text_lines[@]}"; do
+                __char_len "$l_str"
+                (( REPLY > max_len )) && max_len=$REPLY
+            done
+            local line_count=${#text_lines[@]}
+            (( line_count == 0 )) && line_count=1
+            nodes_w["$term"]=$(( max_len * 10 + 32 ))
+            nodes_h["$term"]=$(( line_count * 18 + 18 ))
+            local line_height=18
+            local start_dy=$(( - (line_count - 1) * line_height / 2 ))
+            local tspans="" l
+            for (( l=0; l<line_count; l++ )); do
+                local l_dy=$(( l == 0 ? start_dy : line_height ))
+                tspans+="<tspan x=\"${px}\" dy=\"${l_dy}\">${text_lines[$l]}</tspan>"
+            done
+            node_tspans["$term"]="$tspans"
+        done
+        local svg_w=$(( (max_x - min_x) * GRID_X + PADDING * 2 ))
+        local svg_h=$(( (max_y - min_y) * GRID_Y + PADDING * 2 ))
+        local defs_html="<defs>
+            <filter id=\"wavy\" filterUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"100%\" height=\"100%\">
+                <feTurbulence type=\"fractalNoise\" baseFrequency=\"0.05\" numOctaves=\"1\" result=\"noise\"/>
+                <feDisplacementMap in=\"SourceGraphic\" in2=\"noise\" scale=\"5\" xChannelSelector=\"R\" yChannelSelector=\"G\"/>
+            </filter>
+        </defs>"
+        local layer_arrows=""
+        local layer_nodes=""
+        local pass i
+        for pass in 1 2; do
+            for (( i=0; i<${#arrows_src[@]}; i++ )); do
+                local a_type="${arrows_type[$i]}"
+                if [[ "$pass" == 1 && "$a_type" == "2-arrow" ]]; then continue; fi
+                if [[ "$pass" == 2 && "$a_type" == "arrow" ]]; then continue; fi
+                local a_name="${arrows_name[$i]}"
+                local src="${arrows_src[$i]}" tgt="${arrows_tgt[$i]}"
+                local s_str="${arrows_style[$i]}"
+                local l_style="${s_str%%:*}"; s_str="${s_str#*:}"
+                local a_format="${s_str%%:*}"; s_str="${s_str#*:}"
+                local a_angle="${s_str%%:*}"; s_str="${s_str#*:}"
+                local a_color="${s_str%%:*}"; s_str="${s_str#*:}"
+                local a_label_pos="${s_str%%:*}"; s_str="${s_str#*:}"
+                local a_size="${s_str%%:*}"; s_str="${s_str#*:}"
+                local a_class="${s_str%%:*}"; local a_label="${s_str#*:}"
+
+                local src_coords="${terms[$src]:-}" tgt_coords="${terms[$tgt]:-}"
+                if [[ -n "$src_coords" && -n "$tgt_coords" ]]; then
+                    local sx=${src_coords%,*} sy=${src_coords#*,}
+                    local tx=${tgt_coords%,*} ty=${tgt_coords#*,}
+                    local hw_s=$(( nodes_w[$src] / 2 ))
+                    local hh_s=$(( nodes_h[$src] / 2 ))
+                    local hw_t=$(( nodes_w[$tgt] / 2 ))
+                    local hh_t=$(( nodes_h[$tgt] / 2 ))
+                    local d_path="" d_path_text=""
+                    local path_id="arrow-path-${i}"
+                    local marker_id="arrow-marker-${i}"
+                    local path_class_attr=" class=\"diagram-path${a_class:+ $a_class}\""
+                    local path_color_attr=""
+                    local marker_fill_attr=" class=\"diagram-marker${a_class:+ $a_class}\""
+                    local label_class_attr=" class=\"diagram-text${a_class:+ $a_class}\""
+                    local label_color_attr=""
+                    if [[ -n "$a_color" && "$a_color" != "currentColor" ]]; then
+                        path_class_attr="${a_class:+ class=\"$a_class\"}"
+                        path_color_attr=" stroke=\"${a_color}\""
+                        marker_fill_attr="${a_class:+ class=\"$a_class\"} fill=\"${a_color}\""
+                        label_class_attr="${a_class:+ class=\"$a_class\"}"
+                        label_color_attr=" fill=\"${a_color}\""
+                    fi
+                    if [[ "$a_type" == "2-arrow" ]]; then
+                        local m_stroke_attr=" class=\"diagram-path${a_class:+ $a_class}\""
+                        [[ -n "$a_color" && "$a_color" != "currentColor" ]] && m_stroke_attr="${a_class:+ class=\"$a_class\"} stroke=\"${a_color}\""
+                        defs_html+="<marker id=\"$marker_id\" viewBox=\"0 0 10 10\" refX=\"6\" refY=\"5\" markerWidth=\"8\" markerHeight=\"8\" orient=\"auto-start-reverse\"><path d=\"M 0 1 L 7 5 L 0 9\" fill=\"none\"${m_stroke_attr} stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></marker>"
+                    else
+                        defs_html+="<marker id=\"$marker_id\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" markerWidth=\"7\" markerHeight=\"7\" orient=\"auto-start-reverse\"><path d=\"M 0 0 L 10 5 L 0 10 z\"${marker_fill_attr}/></marker>"
+                    fi
+                    local mx=0 my=0 L=1 dx=0 dy=0 nsx=0 nsy=0 ntx=0 nty=0
+                    if [[ "$src" == "$tgt" ]]; then
+                        d_path="M $sx $((sy - hh_s)) C $((sx - 30)) $((sy - hh_s - 42)), $((sx + 30)) $((sy - hh_s - 42)), $((sx + 10)) $((sy - hh_s - 2))"
+                        d_path_text="$d_path"
+                        mx=$(( sx + 1 ))
+                        my=$(( sy - hh_s - 31 ))
+                    else
+                        local size_int=100
+                        if [[ "$a_size" == *.* ]]; then
+                            local int_part="${a_size%%.*}"
+                            local frac_part="${a_size#*.}00"
+                            size_int=$(( 10#${int_part:-0} * 100 + 10#${frac_part:0:2} ))
+                        elif [[ -n "$a_size" ]]; then
+                            size_int=$(( 10#$a_size * 100 ))
+                        fi
+                        dx=$((tx - sx))
+                        dy=$((ty - sy))
+                        local sign_dx=0 sign_dy=0
+                        (( dx < 0 )) && sign_dx=-1 || { (( dx > 0 )) && sign_dx=1; }
+                        (( dy < 0 )) && sign_dy=-1 || { (( dy > 0 )) && sign_dy=1; }
+
+                        if [[ "$a_format" != "normal" ]]; then
+                            local cx cy
+                            if [[ "$a_format" == "curly" ]]; then
+                                cx=$(( (sx + tx)/2 - (dy * a_angle) / 100 ))
+                                cy=$(( (sy + ty)/2 + (dx * a_angle) / 100 ))
+                            else
+                                cx=$(( (sx + tx)/2 ))
+                                cy=$(( (sy + ty)/2 ))
+                            fi
+                            local dx_s=$(( cx - sx ))
+                            local dy_s=$(( cy - sy ))
+                            local n_s=$(( dx_s*dx_s + dy_s*dy_s ))
+                            local L_s=1
+                            if (( n_s > 0 )); then
+                                local x_val=$n_s y_val=1
+                                while (( x_val > y_val )); do
+                                    x_val=$(( (x_val + y_val) / 2 ))
+                                    y_val=$(( n_s / x_val ))
+                                done
+                                L_s=$x_val
+                            fi
+                            (( L_s == 0 )) && L_s=1
+                            local dx_t=$(( tx - cx ))
+                            local dy_t=$(( ty - cy ))
+                            local n_t=$(( dx_t*dx_t + dy_t*dy_t ))
+                            local L_t=1
+                            if (( n_t > 0 )); then
+                                local x_val=$n_t y_val=1
+                                while (( x_val > y_val )); do
+                                    x_val=$(( (x_val + y_val) / 2 ))
+                                    y_val=$(( n_t / x_val ))
+                                done
+                                L_t=$x_val
+                            fi
+                            (( L_t == 0 )) && L_t=1
+                            local dist_s=0 dist_t=0
+                            local abs_dx_s=${dx_s#-}; local abs_dy_s=${dy_s#-}
+                            if (( abs_dx_s != 0 || abs_dy_s != 0 )); then
+                                if (( abs_dx_s * hh_s > abs_dy_s * hw_s )); then
+                                    (( abs_dx_s == 0 )) && abs_dx_s=1
+                                    dist_s=$(( hw_s * L_s / abs_dx_s ))
+                                else
+                                    (( abs_dy_s == 0 )) && abs_dy_s=1
+                                    dist_s=$(( hh_s * L_s / abs_dy_s ))
+                                fi
+                            fi
+                            local abs_dx_t=${dx_t#-}; local abs_dy_t=${dy_t#-}
+                            if (( abs_dx_t != 0 || abs_dy_t != 0 )); then
+                                if (( abs_dx_t * hh_t > abs_dy_t * hw_t )); then
+                                    (( abs_dx_t == 0 )) && abs_dx_t=1
+                                    dist_t=$(( hw_t * L_t / abs_dx_t ))
+                                else
+                                    (( abs_dy_t == 0 )) && abs_dy_t=1
+                                    dist_t=$(( hh_t * L_t / abs_dy_t ))
+                                fi
+                            fi
+                            local padding_s=$(( L_s * (100 - size_int) / 200 ))
+                            local padding_t=$(( L_t * (100 - size_int) / 200 ))
+                            local gap_s=$(( dist_s + padding_s ))
+                            local gap_t=$(( dist_t + padding_t ))
+
+                            local max_gap_s=$(( L_s - 2 ))
+                            local max_gap_t=$(( L_t - 2 ))
+                            (( gap_s > max_gap_s )) && gap_s=$max_gap_s
+                            (( gap_t > max_gap_t )) && gap_t=$max_gap_t
+                            nsx=$(( sx + dx_s * gap_s / L_s ))
+                            nsy=$(( sy + dy_s * gap_s / L_s ))
+                            ntx=$(( tx - dx_t * gap_t / L_t ))
+                            nty=$(( ty - dy_t * gap_t / L_t ))
+                            if [[ "$a_format" == "curly" ]]; then
+                                d_path="M $nsx $nsy Q $cx $cy $ntx $nty"
+                                d_path_text="M $ntx $nty Q $cx $cy $nsx $nsy"
+                                mx=$(( (nsx + ntx + cx * 2) / 4 ))
+                                my=$(( (nsy + nty + cy * 2) / 4 ))
+                            else
+                                d_path="M $nsx $nsy L $ntx $nty"
+                                d_path_text="M $ntx $nty L $nsx $nsy"
+                                mx=$(( (nsx + ntx)/2 ))
+                                my=$(( (nsy + nty)/2 ))
+                            fi
+                        else
+                            if (( sy == ty )); then
+                                local esx=$(( sx + sign_dx * hw_s ))
+                                local etx=$(( tx - sign_dx * hw_t ))
+                                local L_orth=$(( etx - esx )); L_orth=${L_orth#-}
+                                local gap=$(( L_orth * (100 - size_int) / 200 ))
+                                nsx=$(( esx + sign_dx * gap ))
+                                ntx=$(( etx - sign_dx * gap ))
+                                nsy=$sy nty=$ty
+                                d_path="M $nsx $sy L $ntx $ty"
+                                d_path_text="M $ntx $ty L $nsx $sy"
+                            elif (( sx == tx )); then
+                                local esy=$(( sy + sign_dy * hh_s ))
+                                local ety=$(( ty - sign_dy * hh_t ))
+                                local L_orth=$(( ety - esy )); L_orth=${L_orth#-}
+                                local gap=$(( L_orth * (100 - size_int) / 200 ))
+                                nsy=$(( esy + sign_dy * gap ))
+                                nty=$(( ety - sign_dy * gap ))
+                                nsx=$sx ntx=$tx
+                                d_path="M $sx $nsy L $tx $nty"
+                                d_path_text="M $tx $nty L $sx $nsy"
+                            else
+                                local esx=$(( sx + sign_dx * hw_s ))
+                                local ety=$(( ty - sign_dy * hh_t ))
+                                local abs_tx_esx=$(( tx - esx )); abs_tx_esx=${abs_tx_esx#-}
+                                local abs_ety_sy=$(( ety - sy )); abs_ety_sy=${abs_ety_sy#-}
+                                local L_orth=$(( abs_tx_esx + abs_ety_sy ))
+                                local gap=$(( L_orth * (100 - size_int) / 200 ))
+                                if (( gap <= abs_tx_esx )); then nsx=$(( esx + sign_dx * gap )); nsy=$sy
+                                else nsx=$tx; nsy=$(( sy + sign_dy * (gap - abs_tx_esx) )); fi
+                                if (( gap <= abs_ety_sy )); then ntx=$tx; nty=$(( ety - sign_dy * gap ))
+                                else ntx=$(( tx - sign_dx * (gap - abs_ety_sy) )); nty=$sy; fi
+                                if (( nsy == sy && ntx == tx )); then
+                                    d_path="M $nsx $nsy L $tx $sy L $ntx $nty"
+                                    d_path_text="M $ntx $nty L $tx $sy L $nsx $nsy"
+                                elif (( nsy != sy && ntx == tx )) || (( nsy == sy && ntx != tx )); then
+                                    d_path="M $nsx $nsy L $ntx $nty"
+                                    d_path_text="M $ntx $nty L $nsx $nsy"
+                                else
+                                    d_path="M $nsx $nsy L $tx $sy L $ntx $nty"
+                                    d_path_text="M $ntx $nty L $tx $sy L $nsx $nsy"
+                                fi
+                            fi
+                            mx=$(( (nsx + ntx)/2 ))
+                            my=$(( (nsy + nty)/2 ))
+                        fi
+                        (( nsx <= ntx )) && d_path_text="$d_path"
+                    fi
+                    terms["$a_name"]="${mx},${my}"
+                    nodes_w["$a_name"]=0
+                    nodes_h["$a_name"]=0
+                    local path_props=""
+                    if [[ "$l_style" == "dashed" ]]; then path_props+=" stroke-dasharray=\"6,6\""
+                    elif [[ "$l_style" == "dotted" ]]; then path_props+=" stroke-dasharray=\"0,7\" stroke-linecap=\"round\""
+                    elif [[ "$l_style" == "wavy" ]]; then path_props+=" filter=\"url(#wavy)\""
+                    fi
+                    layer_arrows+="<path id=\"${path_id}-text\" d=\"$d_path_text\" fill=\"none\" stroke=\"none\" />"$'\n'
+                    if [[ "$a_type" == "2-arrow" ]]; then
+                        layer_arrows+="<path id=\"$path_id\" d=\"$d_path\" fill=\"none\"${path_class_attr}${path_color_attr} stroke-width=\"3\"${path_props} />"$'\n'
+                        layer_arrows+="<path d=\"$d_path\" fill=\"none\" class=\"diagram-bg-stroke\" stroke-width=\"1.5\"${path_props} />"$'\n'
+                    else
+                        layer_arrows+="<path id=\"$path_id\" d=\"$d_path\" fill=\"none\"${path_class_attr}${path_color_attr} stroke-width=\"1.5\"${path_props} />"$'\n'
+                    fi
+                    layer_arrows+="<path d=\"$d_path\" fill=\"none\" stroke=\"none\" marker-end=\"url(#${marker_id})\" />"$'\n'
+                    if [[ -n "$a_label" ]]; then
+                        local dy_offset="-5"
+                        [[ "$a_label_pos" == "below" ]] && dy_offset="15"
+                        layer_arrows+="<text dy=\"$dy_offset\" text-anchor=\"middle\"${label_class_attr}${label_color_attr}><textPath href=\"#${path_id}-text\" startOffset=\"50%\">${a_label}</textPath></text>"$'\n'
+                    fi
+                fi
+            done
+        done
+        for term in "${!terms[@]}"; do
+            [[ "${nodes_w[$term]}" == "0" ]] && continue
+            local coords="${terms[$term]}"
+            local tx=${coords%,*} ty=${coords#*,}
+            local border="${nodes_border[$term]:-rounded}"
+            local bg="${nodes_bg[$term]:-default}"
+            local n_class="${nodes_class[$term]:-}"
+            local box_w=${nodes_w[$term]}
+            local box_h=${nodes_h[$term]}
+            local box_x=$(( tx - box_w / 2 ))
+            local box_y=$(( ty - box_h / 2 ))
+            local rx=18
+            [[ "$border" == "squared" ]] && rx=4
+            [[ "$border" == "none" || -z "$border" ]] && rx=0
+            local inline_style=""
+            if [[ "$bg" == "none" ]]; then inline_style+="fill: none; "
+            elif [[ "$bg" != "default" ]]; then inline_style+="fill: ${bg}; "
+            fi
+            [[ "$border" == "none" || -z "$border" ]] && inline_style+="stroke: none; "
+            local style_attr=""
+            [[ -n "$inline_style" ]] && style_attr=" style=\"${inline_style}\""
+            layer_nodes+="<rect x=\"$box_x\" y=\"$box_y\" width=\"$box_w\" height=\"$box_h\" rx=\"$rx\" class=\"diagram-node${n_class:+ $n_class}\" stroke-width=\"1.5\"${style_attr} />"$'\n'
+            layer_nodes+="<text x=\"$tx\" y=\"$ty\" text-anchor=\"middle\" dominant-baseline=\"central\" class=\"diagram-text${n_class:+ $n_class}\">${node_tspans[$term]}</text>"$'\n'
+        done
+        ((page_diagram_count++))
+        local diagram_id="diagram-${page_diagram_count}"
+        content+="<div id=\"${diagram_id}\" class=\"diagram-container\" style=\"overflow-x: auto; padding: 1rem;\">
+<svg width=\"${svg_w}\" height=\"${svg_h}\" viewBox=\"0 0 ${svg_w} ${svg_h}\" xmlns=\"http://www.w3.org/2000/svg\" style=\"max-width: none;\">
+<style>
+            .diagram-node { fill: var(--bg-code, #ffffff); stroke: var(--gray4, #333333); }
+            .diagram-text, .diagram-text * { fill: var(--fg, #333333); font-family: var(--family-diagram, monospace) !important; font-size: 14px; }
+            .diagram-path { stroke: var(--gray4, #333333); }
+            .diagram-bg-stroke { stroke: var(--bg, #ffffff); }
+            .diagram-marker { fill: var(--gray4, #333333); }
+            svg text, svg textPath, svg tspan { font-family: var(--family-diagram, monospace) !important; font-size: 14px !important; }
+        </style>
+${defs_html}
+${layer_arrows}
+${layer_nodes}
+</svg>
+</div>"$'\n'
+        LIST_HTML_MAP["diagram"]+="<li><a href=\"#${diagram_id}\">Diagram ${page_diagram_count}</a></li>"$'\n'
+    }
+
+
+    __block_plain() {
+        local bname="$1"
+        local -n _buffer_ref="$2"
+                 
+        if [[ ${#_buffer_ref[@]} -eq 0 ]]; then return; fi
+        local old_ifs="$IFS"
+        IFS=$'\n'
+        local html="<plain style=\"white-space: pre; overflow-x: auto; display: block;\">"$'\n'"${_buffer_ref[*]}"$'\n'"</plain>"$'\n'
+        IFS="$old_ifs"
+        content+="${html}"
+    }
+
+    __block_pre() {
+        local bname="$1"
+        local -n _buffer_ref="$2"
+        
+        if [[ ${#_buffer_ref[@]} -eq 0 ]]; then return; fi
+        
+        local old_ifs="$IFS"
+        IFS=$'\n'
+        local escaped_text="${_buffer_ref[*]}"
+        IFS="$old_ifs"
+        
+        escaped_text="${escaped_text//&/&amp;}"
+        escaped_text="${escaped_text//</&lt;}"
+        escaped_text="${escaped_text//>/&gt;}"
+        
+        local html="<pre class=\"block-pre\" style=\"white-space: pre; overflow-x: auto; display: block;\">"$'\n'"${escaped_text}"$'\n'"</pre>"$'\n'
+        
+        content+="${html}"
+    }
+
+    __block_tex() {
+        local bname="$1"
+        local -n _buffer_ref="$2"
+
+        (( ${#_buffer_ref[@]} == 0 )) && return 0
+
+        local IFS=$'\n'
+        local tex_content="${_buffer_ref[*]}"
+
+        local svg_output="${LATEX_MEM_CACHE["block:${tex_content}"]:-}"
+        if [[ -z "$svg_output" ]]; then
+            svg_output=$("$_WIKI_DIR/bin/latex" --stdout --dpr 0.4 <<< "$tex_content")
+            svg_output="${svg_output//rgba(0,0,0,1)/var(--fg)}"
+            LATEX_MEM_CACHE["block:${tex_content}"]="$svg_output"
+        fi
+
+        content+="<div class=\"latex\">"$'\n'"${svg_output}"$'\n'"</div>"$'\n'
+    }   
+
+    __get_style_attr_r() {
+        local b_width="$1" b_style="$2"
+        local inline_style=""
+        if [[ -n "$b_width" ]]; then
+            if [[ "$b_width" == *"="* ]]; then
+                local prev_IFS="$IFS"
+                IFS=','
+                local w_tokens=($b_width)
+                IFS="$prev_IFS"
+                local w_tok
+                for w_tok in "${w_tokens[@]}"; do
+                    w_tok="${w_tok#"${w_tok%%[![:space:]]*}"}"
+                    w_tok="${w_tok%"${w_tok##*[![:space:]]}"}"
+                    local prop="${w_tok%%=*}"
+                    local val="${w_tok#*=}"
+                    [[ "$val" =~ ^[0-9]+$ ]] && val="${val}px"
+                    if [[ "$prop" == "max" ]]; then inline_style+="max-width:${val};"
+                    elif [[ "$prop" == "min" ]]; then inline_style+="min-width:${val};"
+                    elif [[ "$prop" == "width" ]]; then inline_style+="width:${val};"
+                    fi
+                done
+            else
+                [[ "$b_width" =~ ^[0-9]+$ ]] && b_width="${b_width}px"
+                inline_style+="width:${b_width};"
+            fi
+        fi
+        if [[ -n "$b_style" ]]; then
+            inline_style+="${b_style}"
+            [[ "${inline_style: -1}" != ";" && -n "$inline_style" ]] && inline_style+=";"
+        fi
+        if [[ -n "$inline_style" ]]; then
+            REPLY=" style=\"${inline_style}\""
+        else
+            REPLY=""
+        fi
+    }
+
+    __get_style_attr() {
+        __get_style_attr_r "$@"
+        printf '%s' "$REPLY"
+    }
+
+    __block_image() {
+        local bname="$1"
+        local -n img_buffer_ref="$2"
+        if (( ${#img_buffer_ref[@]} == 0 )); then return; fi
+        local b_id="rnd-$RANDOM"
+        local b_img="" b_alt="" b_cap="" b_width="" b_style="" b_align=""
+        local i_width="" i_style=""
+        local current_key="" current_val="" b_line l_trim after_col k_part v_part
+        for b_line in "${img_buffer_ref[@]}"; do
+            l_trim="${b_line#"${b_line%%[![:space:]]*}"}"
+            if [[ "$l_trim" == "::"* ]]; then
+                after_col="${l_trim#::}"
+                after_col="${after_col#"${after_col%%[![:space:]]*}"}"
+                if [[ "$after_col" == *:* ]]; then
+                    k_part="${after_col%%:*}"
+                    if [[ -n "$k_part" && -z "${k_part//[a-zA-Z0-9_-]/}" ]]; then
+                        if [[ -n "$current_key" ]]; then
+                            case "$current_key" in
+                                __id__) b_id="$current_val" ;;
+                                image) b_img="$current_val" ;;
+                                alt) b_alt="$current_val" ;;
+                                __caption__) b_cap="$current_val" ;;
+                                align) b_align="$current_val" ;;
+                                __width__) b_width="$current_val" ;;
+                                __style__) b_style="$current_val" ;;
+                                width) i_width="$current_val" ;;
+                                style) i_style="$current_val" ;;
+                            esac
+                        fi
+                        current_key="$k_part"
+                        v_part="${after_col#*:}"
+                        v_part="${v_part#"${v_part%%[![:space:]]*}"}"
+                        v_part="${v_part%"${v_part##*[![:space:]]}"}"
+                        current_val="$v_part"
+                        continue
+                    fi
+                fi
+            fi
+            if [[ -n "$current_key" ]]; then
+                current_val+=$'\n'"$b_line"
+            fi
+        done
+        if [[ -n "$current_key" ]]; then
+            case "$current_key" in
+                __id__) b_id="$current_val" ;;
+                image) b_img="$current_val" ;;
+                alt) b_alt="$current_val" ;;
+                __caption__) b_cap="$current_val" ;;
+                align) b_align="$current_val" ;;
+                __width__) b_width="$current_val" ;;
+                __style__) b_style="$current_val" ;;
+                width) i_width="$current_val" ;;
+                style) i_style="$current_val" ;;
+            esac
+        fi
+        if [[ -n "$b_img" && "$b_img" != http://* && "$b_img" != https://* && "$b_img" != /* ]]; then
+            local target_dir=""
+            if [[ "$b_img" == "./"* ]]; then
+                local dir_path="${current_dir//./\/}"
+                [[ "$dir_path" == "/" ]] && dir_path=""
+                target_dir="${dir_path:+/$dir_path}"
+                b_img="${b_img#./}"
+            fi
+            if [[ "$b_img" != *.* ]]; then
+                local ext="" e
+                for e in webp png jpg jpeg; do
+                    if [[ -f "$BUILDDIR/_assets${target_dir}/${b_img}.${e}" ]]; then
+                        ext="$e"
+                        break
+                    fi
+                done
+                if [[ -n "$ext" && "$ext" != "webp" && ! -f "$BUILDDIR/_assets${target_dir}/${b_img}.webp" ]]; then
+                    if type cwebp >/dev/null 2>&1; then
+                        cwebp -q 80 "$BUILDDIR/_assets${target_dir}/${b_img}.${ext}" -o "$BUILDDIR/_assets${target_dir}/${b_img}.webp" >/dev/null 2>&1 && ext="webp"
+                    elif type convert >/dev/null 2>&1; then
+                        convert "$BUILDDIR/_assets${target_dir}/${b_img}.${ext}" -quality 80 "$BUILDDIR/_assets${target_dir}/${b_img}.webp" >/dev/null 2>&1 && ext="webp"
+                    fi
+                fi
+                [[ -n "$ext" ]] && b_img="${b_img}.${ext}"
+            fi
+            b_img="/_assets${target_dir}/${b_img}"
+        fi
+        if [[ -n "$b_align" ]]; then
+            b_style="display: flex; flex-direction: column; align-items: ${b_align}; justify-content: ${b_align}; text-align: ${b_align}; ${b_style}"
+        fi
+        __get_style_attr_r "$b_width" "$b_style"; local style_attr="$REPLY"
+        __get_style_attr_r "$i_width" "$i_style"; local img_style_attr="$REPLY"
+        if [[ -z "$img_style_attr" ]]; then
+            img_style_attr=" style=\"width: inherit;\""
+        elif [[ "$img_style_attr" != *"width"* ]]; then
+            img_style_attr="${img_style_attr%\"}; width: inherit;\""
+        fi
+        local html="<figure id=\"block-image-${b_id}\" class=\"block-image\"${style_attr}>"$'\n'
+        html+="    <img src=\"${b_img}\" alt=\"${b_alt}\" class=\"block-image-img\"${img_style_attr}>"$'\n'
+        if [[ -n "$b_cap" ]]; then
+            html+="    <figcaption class=\"block-image-caption\">${b_cap}</figcaption>"$'\n'
+        fi
+        html+="</figure>"$'\n'
+        content+="${html}"
+    }    
+
+
+    __block_text() {
+        local bname="$1"
+        local _ref="$2[@]"
+        local -a my_buffer=("${!_ref}")
+        if [[ ${#my_buffer[@]} -eq 0 ]]; then return; fi
+        local t_id="rnd-$RANDOM"
+        local t_text="" b_width="" b_style="" t_width="" t_style=""
+        
+        local -A child_html=()
+        local in_child="" child_name="" child_indent=""
+        local -a child_buffer=()
+        local -a child_order=()
+        
+        local current_key="" current_val="" b_line
+        for b_line in "${my_buffer[@]}"; do
+            if [[ -n "$in_child" ]]; then
+                if [[ "$b_line" =~ ^([[:space:]]*)\{\{[[:space:]]*block\.end[[:space:]]*\}\}[[:space:]]*$ ]] && [[ "${BASH_REMATCH[1]}" == "$child_indent" ]]; then
+                    local c_id="" c_line
+                    for c_line in "${child_buffer[@]}"; do
+                        if [[ "$c_line" =~ ^[[:space:]]*::[[:space:]]*__id__[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+                            c_id="${BASH_REMATCH[1]}"
+                            c_id="${c_id#"${c_id%%[![:space:]]*}"}"; c_id="${c_id%"${c_id##*[![:space:]]}"}"
+                            break
+                        fi
+                    done
+                    if [[ -n "$current_key" ]]; then
+                        current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+                        current_val="${current_val%"${current_val##*[![:space:]]}"}"
+                        if [[ "$current_key" == "__id__" ]]; then t_id="$current_val"
+                        elif [[ "$current_key" == "text" ]]; then t_text="$current_val"
+                        elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+                        elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"
+                        elif [[ "$current_key" == "width" ]]; then t_width="$current_val"
+                        elif [[ "$current_key" == "style" ]]; then t_style="$current_val"; fi
+                        current_key=""
+                    fi
+                    local old_content="$content"
+                    content=""
+                    if declare -F "__block_${child_name}" >/dev/null; then
+                        "__block_${child_name}" "$child_name" child_buffer
+                    else
+                        __block_core "$child_name" child_buffer
+                    fi
+                    [[ -z "$c_id" ]] && c_id="child-${#child_order[@]}-$RANDOM"
+                    child_html["$c_id"]="$content"
+                    child_order+=("$c_id")
+                    content="$old_content"
+                    in_child=""
+                else
+                    child_buffer+=("$b_line")
+                fi
+                continue
+            fi
+            
+            if [[ "$b_line" =~ ^([[:space:]]*)\{\{[[:space:]]*block\.([a-zA-Z0-9_-]+)[[:space:]]*\}\}[[:space:]]*$ ]]; then
+                in_child="1"
+                child_indent="${BASH_REMATCH[1]}"
+                child_name="${BASH_REMATCH[2]}"
+                child_buffer=()
+                if [[ -n "$current_key" ]]; then
+                    current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+                    current_val="${current_val%"${current_val##*[![:space:]]}"}"
+                    if [[ "$current_key" == "__id__" ]]; then t_id="$current_val"
+                    elif [[ "$current_key" == "text" ]]; then t_text="$current_val"
+                    elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+                    elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"
+                    elif [[ "$current_key" == "width" ]]; then t_width="$current_val"
+                    elif [[ "$current_key" == "style" ]]; then t_style="$current_val"; fi
+                    current_key=""
+                fi
+                continue
+            fi
+            
+            if [[ "$b_line" =~ ^[[:space:]]*::[[:space:]]*end[[:space:]]*: ]]; then
+                if [[ -n "$current_key" ]]; then
+                    current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+                    current_val="${current_val%"${current_val##*[![:space:]]}"}"
+                    if [[ "$current_key" == "__id__" ]]; then t_id="$current_val"
+                    elif [[ "$current_key" == "text" ]]; then t_text="$current_val"
+                    elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+                    elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"
+                    elif [[ "$current_key" == "width" ]]; then t_width="$current_val"
+                    elif [[ "$current_key" == "style" ]]; then t_style="$current_val"; fi
+                    current_key=""
+                fi
+                continue
+            fi
+            
+            if [[ "$b_line" =~ ^[[:space:]]*::[[:space:]]*([a-zA-Z0-9_-]+):[[:space:]]*(.*)$ ]]; then
+                if [[ -n "$current_key" ]]; then
+                    current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+                    current_val="${current_val%"${current_val##*[![:space:]]}"}"
+                    if [[ "$current_key" == "__id__" ]]; then t_id="$current_val"
+                    elif [[ "$current_key" == "text" ]]; then t_text="$current_val"
+                    elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+                    elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"
+                    elif [[ "$current_key" == "width" ]]; then t_width="$current_val"
+                    elif [[ "$current_key" == "style" ]]; then t_style="$current_val"; fi
+                fi
+                current_key="${BASH_REMATCH[1]}"
+                current_val="${BASH_REMATCH[2]}"
+                current_val="${current_val#"${current_val%%[![:space:]]*}"}"
+                current_val="${current_val%"${current_val##*[![:space:]]}"}"
+            else
+                if [[ -n "$current_key" ]]; then
+                    current_val+=$'\n'"$b_line"
+                fi
+            fi
+        done
+        if [[ -n "$current_key" ]]; then
+            current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+            current_val="${current_val%"${current_val##*[![:space:]]}"}"
+            if [[ "$current_key" == "__id__" ]]; then t_id="$current_val"
+            elif [[ "$current_key" == "text" ]]; then t_text="$current_val"
+            elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+            elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"
+            elif [[ "$current_key" == "width" ]]; then t_width="$current_val"
+            elif [[ "$current_key" == "style" ]]; then t_style="$current_val"; fi
+        fi
+        
+        if type __parse_block_field_r >/dev/null 2>&1; then
+            __parse_block_field_r "$t_text"; t_text="$REPLY"
+        elif type __parse_block_field >/dev/null 2>&1; then
+            t_text="$(__parse_block_field "$t_text")"
+        else
+            t_text="${t_text//$'\n'/<br>}"
+        fi
+        
+        __get_style_attr_r "$b_width" "$b_style"; local style_attr="$REPLY"
+        __get_style_attr_r "$t_width" "$t_style"; local tag_style_attr="$REPLY"
+        
+        local html="<div id=\"block-text-wrapper-${t_id}\" class=\"block-text-wrapper\"${style_attr}>"$'\n'
+        html+="    <text id=\"block-text-${t_id}\" class=\"block-text\"${tag_style_attr}>"$'\n'
+        html+="        ${t_text}"$'\n'
+        for c_id in "${child_order[@]}"; do
+            html+="${child_html[$c_id]}"$'\n'
+        done
+        html+="    </text>"$'\n'
+        html+="</div>"$'\n'
+        content+="${html}"
+    }
+
+    __block_hide() {
+        if (( ${#hide_buffer[@]} == 0 )); then return; fi
+        local h_title="" h_hide="" b_width="" b_style=""
+        local current_key="" current_val=""
+        local b_line l_trim after_col k_part v_part
+        for b_line in "${hide_buffer[@]}"; do
+            l_trim="${b_line#"${b_line%%[![:space:]]*}"}"
+            if [[ "$l_trim" == "::"* ]]; then
+                after_col="${l_trim#::}"
+                after_col="${after_col#"${after_col%%[![:space:]]*}"}"
+                if [[ "$after_col" == *:* ]]; then
+                    k_part="${after_col%%:*}"
+                    if [[ -n "$k_part" && -z "${k_part//[a-zA-Z0-9_-]/}" ]]; then
+                        if [[ -n "$current_key" ]]; then
+                            case "$current_key" in
+                                title) h_title="$current_val" ;;
+                                hide) h_hide="$current_val" ;;
+                                __width__) b_width="$current_val" ;;
+                                __style__) b_style="$current_val" ;;
+                            esac
+                        fi
+                        current_key="$k_part"
+                        v_part="${after_col#*:}"
+                        v_part="${v_part#"${v_part%%[![:space:]]*}"}"
+                        v_part="${v_part%"${v_part##*[![:space:]]}"}"
+                        current_val="$v_part"
+                        continue
+                    fi
+                fi
+            fi
+            if [[ -n "$current_key" ]]; then
+                current_val+=$'\n'"$b_line"
+            fi
+        done
+        if [[ -n "$current_key" ]]; then
+            case "$current_key" in
+                title) h_title="$current_val" ;;
+                hide) h_hide="$current_val" ;;
+                __width__) b_width="$current_val" ;;
+                __style__) b_style="$current_val" ;;
+            esac
+        fi
+
+        __parse_block_field_r "$h_hide"; h_hide="$REPLY"
+
+        local temp_line="$line"
+        line="$h_title"
+        line="${line//&/$_amp}"; line="${line//</$_lt}"; line="${line//>/$_gt}"
+        __parse_inline
+        h_title="$line"
+        line="$temp_line"
+
+        __get_style_attr_r "$b_width" "$b_style"; local style_attr="$REPLY"
+        content+="<details class=\"hide-block\"${style_attr}>
+<summary class=\"hide-title\">${h_title}</summary>
+<div class=\"hide-content\">
+${h_hide}
+</div>
+</details>"$'\n'
+    }   
+
+    __block_buttons() {
+        local bname="$1"
+        local -n my_buffer="$2"
+        if (( ${#my_buffer[@]} == 0 )); then return; fi
+        local b_id="rnd-$RANDOM"
+        local b_width="" b_style=""
+        local -a btns=()
+        local current_key="" current_val="" b_line l_trim after_col k_part v_part
+
+        for b_line in "${my_buffer[@]}"; do
+            l_trim="${b_line#"${b_line%%[![:space:]]*}"}"
+            if [[ "$l_trim" == "::"* ]]; then
+                after_col="${l_trim#::}"
+                after_col="${after_col#"${after_col%%[![:space:]]*}"}"
+                if [[ "$after_col" == *:* ]]; then
+                    k_part="${after_col%%:*}"
+                    if [[ -n "$k_part" && -z "${k_part//[a-zA-Z0-9_-]/}" ]]; then
+                        if [[ -n "$current_key" ]]; then
+                            case "$current_key" in
+                                __id__) b_id="$current_val" ;;
+                                button) btns+=("$current_val") ;;
+                                __width__) b_width="$current_val" ;;
+                                __style__) b_style="$current_val" ;;
+                            esac
+                        fi
+                        current_key="$k_part"
+                        v_part="${after_col#*:}"
+                        v_part="${v_part#"${v_part%%[![:space:]]*}"}"
+                        v_part="${v_part%"${v_part##*[![:space:]]}"}"
+                        current_val="$v_part"
+                        continue
+                    fi
+                fi
+            fi
+            if [[ -n "$current_key" ]]; then
+                current_val+=$'\n'"$b_line"
+            fi
+        done
+
+        if [[ -n "$current_key" ]]; then
+            case "$current_key" in
+                __id__) b_id="$current_val" ;;
+                button) btns+=("$current_val") ;;
+                __width__) b_width="$current_val" ;;
+                __style__) b_style="$current_val" ;;
+            esac
+        fi
+
+        __get_style_attr_r "$b_width" "$b_style"; local style_attr="$REPLY"
+        local html="<buttons id=\"block-card-buttons-${b_id}\" class=\"block-card-buttons\"${style_attr}>"$'\n'
+        local i=1 btn temp_text temp_url js_click
+
+        for btn in "${btns[@]}"; do
+            temp_text=""
+            temp_url=""
+            if [[ "$btn" =~ text=\"([^\"]+)\" ]]; then temp_text="${BASH_REMATCH[1]}"
+            elif [[ "$btn" =~ text=\'([^\']+)\' ]]; then temp_text="${BASH_REMATCH[1]}"
+            elif [[ "$btn" =~ text=([^,]+) ]]; then temp_text="${BASH_REMATCH[1]}"; fi
+
+            if [[ "$btn" =~ url=\"([^\"]+)\" ]]; then temp_url="${BASH_REMATCH[1]}"
+            elif [[ "$btn" =~ url=\'([^\']+)\' ]]; then temp_url="${BASH_REMATCH[1]}"
+            elif [[ "$btn" =~ url=([^,]+) ]]; then temp_url="${BASH_REMATCH[1]}"; fi
+
+            if [[ -z "$temp_url" ]]; then
+                if [[ "$btn" =~ path=\"([^\"]+)\" ]]; then temp_url="${BASH_REMATCH[1]}"
+                elif [[ "$btn" =~ path=\'([^\']+)\' ]]; then temp_url="${BASH_REMATCH[1]}"
+                elif [[ "$btn" =~ path=([^,]+) ]]; then temp_url="${BASH_REMATCH[1]}"; fi
+
+                if [[ -n "$temp_url" ]]; then
+                    [[ "$temp_url" != /* ]] && temp_url="/${temp_url}"
+                    if [[ "$temp_url" == *.md ]]; then
+                        temp_url="${temp_url%.md}.html"
+                    elif [[ "$temp_url" != *.* ]]; then
+                        temp_url="${temp_url}.html"
+                    fi
+                fi
+            fi
+
+            if [[ -z "$temp_text" && -n "$temp_url" ]]; then
+                temp_text="${temp_url##*/}"
+                temp_text="${temp_text%.*}"
+                temp_text="${temp_text//[-_]/ }"
+            fi
+
+            if [[ "$temp_url" == http://* || "$temp_url" == https://* ]]; then
+                js_click="window.open('${temp_url}', '_blank');"
+            else
+                js_click="window.location.href='${temp_url}';"
+            fi
+
+            html+="    <button id=\"block-card-button-${i}-${b_id}\" class=\"block-card-button-${i}\" href=\"${temp_url}\" onclick=\"${js_click}\">${temp_text}</button>"$'\n'
+            ((i++))
+        done
+
+        html+="</buttons>"$'\n'
+        content+="${html}"
+    }
+
+    __block_card() {
+        local bname="$1"
+        local -n card_buffer_ref="$2"
+        if (( ${#card_buffer_ref[@]} == 0 )); then return; fi
+        local b_id="rnd-$RANDOM"
+        local c_cover="" c_text="" b_width="" b_style=""
+        local -a btns=()
+        local current_key="" current_val="" b_line l_trim after_col k_part v_part
+        for b_line in "${card_buffer_ref[@]}"; do
+            l_trim="${b_line#"${b_line%%[![:space:]]*}"}"
+            if [[ "$l_trim" == "::"* ]]; then
+                after_col="${l_trim#::}"
+                after_col="${after_col#"${after_col%%[![:space:]]*}"}"
+                if [[ "$after_col" == *:* ]]; then
+                    k_part="${after_col%%:*}"
+                    if [[ -n "$k_part" && -z "${k_part//[a-zA-Z0-9_-]/}" ]]; then
+                        if [[ -n "$current_key" ]]; then
+                            case "$current_key" in
+                                __id__) b_id="$current_val" ;;
+                                cover) c_cover="$current_val" ;;
+                                text) c_text="$current_val" ;;
+                                button) btns+=("$current_val") ;;
+                                __width__) b_width="$current_val" ;;
+                                __style__) b_style="$current_val" ;;
+                            esac
+                        fi
+                        current_key="$k_part"
+                        v_part="${after_col#*:}"
+                        v_part="${v_part#"${v_part%%[![:space:]]*}"}"
+                        v_part="${v_part%"${v_part##*[![:space:]]}"}"
+                        current_val="$v_part"
+                        continue
+                    fi
+                fi
+            fi
+            if [[ -n "$current_key" ]]; then
+                current_val+=$'\n'"$b_line"
+            fi
+        done
+        if [[ -n "$current_key" ]]; then
+            case "$current_key" in
+                __id__) b_id="$current_val" ;;
+                cover) c_cover="$current_val" ;;
+                text) c_text="$current_val" ;;
+                button) btns+=("$current_val") ;;
+                __width__) b_width="$current_val" ;;
+                __style__) b_style="$current_val" ;;
+            esac
+        fi
+
+        __get_style_attr_r "$b_width" "$b_style"; local style_attr="$REPLY"
+        local html="<card id=\"block-card-${b_id}\" class=\"block-card\"${style_attr}>"$'\n'
+        if [[ -n "$c_cover" ]]; then
+            local cover_src="$c_cover"
+            if [[ "$cover_src" != http://* && "$cover_src" != https://* && "$cover_src" != /* ]]; then
+                if [[ "$cover_src" != *.* ]]; then
+                    if [[ -f "$BUILDDIR/_assets/${cover_src}.webp" ]]; then cover_src="${cover_src}.webp"
+                    elif [[ -f "$BUILDDIR/_assets/${cover_src}.png" ]]; then cover_src="${cover_src}.png"
+                    elif [[ -f "$BUILDDIR/_assets/${cover_src}.jpg" ]]; then cover_src="${cover_src}.jpg"
+                    elif [[ -f "$BUILDDIR/_assets/${cover_src}.jpeg" ]]; then cover_src="${cover_src}.jpeg"
+                    fi
+                fi
+                cover_src="/_assets/${cover_src}"
+            fi
+            html+="    <cover id=\"block-card-cover-${b_id}\" class=\"block-card-cover\">"$'\n'
+            html+="        <img id=\"block-card-cover-img-${b_id}\" class=\"block-card-cover-img\" src=\"${cover_src}\"></img>"$'\n'
+            html+="    </cover>"$'\n'
+        fi
+        if [[ -n "$c_text" ]]; then
+            c_text="${c_text//\\n/$'\n'}"
+            __parse_block_field_r "$c_text"; c_text="$REPLY"
+            html+="    <text id=\"block-card-text-${b_id}\" class=\"block-card-text\">${c_text}</text>"$'\n'
+        fi
+        if (( ${#btns[@]} > 0 )); then
+            content+="${html}"
+            local -a fake_btn_buffer=(":: __id__: ${b_id}")
+            local btn
+            for btn in "${btns[@]}"; do
+                fake_btn_buffer+=(":: button: ${btn}")
+            done
+            __block_buttons "buttons" fake_btn_buffer
+            content+="</card>"$'\n'
+        else
+            html+="</card>"$'\n'
+            content+="${html}"
+        fi
+    }    
+
+    __block_card() {
+        local bname="$1"
+        local -n card_buffer_ref="$2"
+        if [[ ${#card_buffer_ref[@]} -eq 0 ]]; then return; fi
+        local b_id="rnd-$RANDOM"
+        local c_cover="" c_text="" b_width="" b_style=""
+        local -a btns=()
+        local current_key="" current_val="" b_line
+        for b_line in "${card_buffer_ref[@]}"; do
+            if [[ "$b_line" =~ ^[[:space:]]*::[[:space:]]*([a-zA-Z0-9_-]+):[[:space:]]*(.*)$ ]]; then
+                if [[ -n "$current_key" ]]; then
+                    if [[ "$current_key" == "__id__" ]]; then b_id="$current_val"
+                    elif [[ "$current_key" == "cover" ]]; then c_cover="$current_val"
+                    elif [[ "$current_key" == "text" ]]; then c_text="$current_val"
+                    elif [[ "$current_key" == "button" ]]; then btns+=("$current_val")
+                    elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+                    elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"; fi
+                fi
+                current_key="${BASH_REMATCH[1]}"
+                current_val="${BASH_REMATCH[2]}"
+                current_val="${current_val#"${current_val%%[![:space:]]*}"}"
+                current_val="${current_val%"${current_val##*[![:space:]]}"}"
+            else
+                if [[ -n "$current_key" ]]; then
+                    current_val+=$'\n'"$b_line"
+                fi
+            fi
+        done
+        if [[ -n "$current_key" ]]; then
+            if [[ "$current_key" == "__id__" ]]; then b_id="$current_val"
+            elif [[ "$current_key" == "cover" ]]; then c_cover="$current_val"
+            elif [[ "$current_key" == "text" ]]; then c_text="$current_val"
+            elif [[ "$current_key" == "button" ]]; then btns+=("$current_val")
+            elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+            elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"; fi
+        fi
+        
+        __get_style_attr_r "$b_width" "$b_style"; local style_attr="$REPLY"
+        local html="<card id=\"block-card-${b_id}\" class=\"block-card\"${style_attr}>"$'\n'
+        if [[ -n "$c_cover" ]]; then
+            local cover_src="$c_cover"
+            if [[ "$cover_src" != http://* && "$cover_src" != https://* && "$cover_src" != /* ]]; then
+                if [[ "$cover_src" != *.* ]]; then
+                    if [[ -f "$BUILDDIR/_assets/${cover_src}.webp" ]]; then cover_src="${cover_src}.webp"
+                    elif [[ -f "$BUILDDIR/_assets/${cover_src}.png" ]]; then cover_src="${cover_src}.png"
+                    elif [[ -f "$BUILDDIR/_assets/${cover_src}.jpg" ]]; then cover_src="${cover_src}.jpg"
+                    elif [[ -f "$BUILDDIR/_assets/${cover_src}.jpeg" ]]; then cover_src="${cover_src}.jpeg"
+                    fi
+                fi
+                cover_src="/_assets/${cover_src}"
+            fi
+            html+="    <cover id=\"block-card-cover-${b_id}\" class=\"block-card-cover\">"$'\n'
+            html+="        <img id=\"block-card-cover-img-${b_id}\" class=\"block-card-cover-img\" src=\"${cover_src}\"></img>"$'\n'
+            html+="    </cover>"$'\n'
+        fi
+        if [[ -n "$c_text" ]]; then
+            c_text="${c_text//\\n/$'\n'}"
+            if type __parse_multiline >/dev/null 2>&1; then
+                c_text="$(__parse_multiline "$c_text")"
+            elif type __parse_block_field_r >/dev/null 2>&1; then
+                __parse_block_field_r "$c_text"; c_text="$REPLY"
+            elif type __parse_block_field >/dev/null 2>&1; then
+                c_text="$(__parse_block_field "$c_text")"
+            fi
+            html+="    <text id=\"block-card-text-${b_id}\" class=\"block-card-text\">${c_text}</text>"$'\n'
+        fi
+        if [[ ${#btns[@]} -gt 0 ]]; then
+            content+="${html}"
+            local -a fake_btn_buffer=(":: __id__: ${b_id}")
+            local btn
+            for btn in "${btns[@]}"; do
+                fake_btn_buffer+=(":: button: ${btn}")
+            done
+            __block_buttons "buttons" fake_btn_buffer
+            content+="</card>"$'\n'
+        else
+            html+="</card>"$'\n'
+            content+="${html}"
+        fi
+    }
+
+
+    __block_row() {
+        local bname="$1"
+        local _ref="$2[@]"
+        local -a my_buffer=("${!_ref}")
+        if [[ ${#my_buffer[@]} -eq 0 ]]; then return; fi
+        local r_id="rnd-$RANDOM"
+        local r_gap="" b_width="" b_style=""
+        local -a items=()
+        local -A child_html=()
+        local in_child="" child_name="" child_indent=""
+        local -a child_buffer=()
+        local current_key="" current_val="" b_line
+        
+        for b_line in "${my_buffer[@]}"; do
+            if [[ -n "$in_child" ]]; then
+                if [[ "$b_line" =~ ^([[:space:]]*)\{\{[[:space:]]*block\.end[[:space:]]*\}\}[[:space:]]*$ ]] && [[ "${BASH_REMATCH[1]}" == "$child_indent" ]]; then
+                    local c_id="" c_line
+                    for c_line in "${child_buffer[@]}"; do
+                        if [[ "$c_line" =~ ^[[:space:]]*::[[:space:]]*__id__[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+                            c_id="${BASH_REMATCH[1]}"
+                            c_id="${c_id#"${c_id%%[![:space:]]*}"}"; c_id="${c_id%"${c_id##*[![:space:]]}"}"
+                            break
+                        fi
+                    done
+                    if [[ -n "$current_key" ]]; then
+                        current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+                        current_val="${current_val%"${current_val##*[![:space:]]}"}"
+                        if [[ "$current_key" == "__id__" ]]; then r_id="$current_val"
+                        elif [[ "$current_key" == "gap" ]]; then r_gap="$current_val"
+                        elif [[ "$current_key" == "item" ]]; then items+=("$current_val")
+                        elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+                        elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"; fi
+                        current_key=""
+                    fi
+                    local old_content="$content"
+                    content=""
+                    if declare -F "__block_${child_name}" >/dev/null; then
+                        "__block_${child_name}" "$child_name" child_buffer
+                    else
+                        __block_core "$child_name" child_buffer
+                    fi
+                    if [[ -n "$c_id" ]]; then
+                        child_html["$c_id"]="$content"
+                    fi
+                    content="$old_content"
+                    in_child=""
+                else
+                    child_buffer+=("$b_line")
+                fi
+                continue
+            fi
+            
+            if [[ "$b_line" =~ ^([[:space:]]*)\{\{[[:space:]]*block\.([a-zA-Z0-9_-]+)[[:space:]]*\}\}[[:space:]]*$ ]]; then
+                in_child="1"
+                child_indent="${BASH_REMATCH[1]}"
+                child_name="${BASH_REMATCH[2]}"
+                child_buffer=()
+                
+                if [[ -n "$current_key" ]]; then
+                    current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+                    current_val="${current_val%"${current_val##*[![:space:]]}"}"
+                    if [[ "$current_key" == "__id__" ]]; then r_id="$current_val"
+                    elif [[ "$current_key" == "gap" ]]; then r_gap="$current_val"
+                    elif [[ "$current_key" == "item" ]]; then items+=("$current_val")
+                    elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+                    elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"; fi
+                    current_key=""
+                fi
+                continue
+            fi
+            
+            if [[ "$b_line" =~ ^[[:space:]]*::[[:space:]]*([a-zA-Z0-9_-]+):[[:space:]]*(.*)$ ]]; then
+                if [[ -n "$current_key" ]]; then
+                    current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+                    current_val="${current_val%"${current_val##*[![:space:]]}"}"
+                    if [[ "$current_key" == "__id__" ]]; then r_id="$current_val"
+                    elif [[ "$current_key" == "gap" ]]; then r_gap="$current_val"
+                    elif [[ "$current_key" == "item" ]]; then items+=("$current_val")
+                    elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+                    elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"; fi
+                fi
+                current_key="${BASH_REMATCH[1]}"
+                current_val="${BASH_REMATCH[2]}"
+                current_val="${current_val#"${current_val%%[![:space:]]*}"}"
+                current_val="${current_val%"${current_val##*[![:space:]]}"}"
+            else
+                if [[ -n "$current_key" ]]; then
+                    current_val+=$'\n'"$b_line"
+                fi
+            fi
+        done
+        
+        if [[ -n "$current_key" ]]; then
+            current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+            current_val="${current_val%"${current_val##*[![:space:]]}"}"
+            if [[ "$current_key" == "__id__" ]]; then r_id="$current_val"
+            elif [[ "$current_key" == "gap" ]]; then r_gap="$current_val"
+            elif [[ "$current_key" == "item" ]]; then items+=("$current_val")
+            elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+            elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"; fi
+        fi
+        
+        local items_style=""
+        if [[ -n "$r_gap" ]]; then
+            if [[ "$r_gap" =~ ^[0-9]+$ ]]; then r_gap="${r_gap}px"; fi
+            items_style=" style=\"gap: ${r_gap};\""
+        fi
+        
+        __get_style_attr_r "$b_width" "$b_style"; local style_attr="$REPLY"
+        local html="<row id=\"block-row-${r_id}\" class=\"block-row\"${style_attr}>"$'\n'
+        html+="    <items id=\"block-row-items-${r_id}\" class=\"block-row-items\"${items_style}>"$'\n'
+        
+        local i=1 it it_id it_pos class_attr inline_child_style child_content
+        for it in "${items[@]}"; do
+            it_id=""
+            it_pos=""
+            if [[ "$it" == *"="* ]]; then
+                local prev_IFS="$IFS"
+                IFS=','
+                local tokens=($it)
+                IFS="$prev_IFS"
+                local token
+                for token in "${tokens[@]}"; do
+                    token="${token#"${token%%[![:space:]]*}"}"
+                    token="${token%"${token##*[![:space:]]}"}"
+                    if [[ "$token" == id=* ]]; then
+                        it_id="${token#id=}"
+                    elif [[ "$token" == pos=* ]]; then
+                        it_pos="${token#pos=}"
+                    fi
+                done
+            else
+                it_id="$it"
+            fi
+            
+            it_id="${it_id//\"/}"
+            it_id="${it_id//\'/}"
+            it_id="${it_id#"${it_id%%[![:space:]]*}"}"
+            it_id="${it_id%"${it_id##*[![:space:]]}"}"
+            
+            it_pos="${it_pos//\"/}"
+            it_pos="${it_pos//\'/}"
+            it_pos="${it_pos#"${it_pos%%[![:space:]]*}"}"
+            it_pos="${it_pos%"${it_pos##*[![:space:]]}"}"
+            
+            class_attr="block-row-item-${i}"
+            inline_child_style=""
+            
+            if [[ -n "$it_pos" ]]; then
+                class_attr+=" pos-${it_pos}"
+                if [[ "$it_pos" == "center" ]]; then inline_child_style=" style=\"display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center;\""
+                elif [[ "$it_pos" == "left" ]]; then inline_child_style=" style=\"display: flex; flex-direction: column; justify-content: flex-start; align-items: flex-start; text-align: left;\""
+                elif [[ "$it_pos" == "right" ]]; then inline_child_style=" style=\"display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-end; text-align: right;\""
+                fi
+            fi
+            child_content="${child_html[$it_id]:-}"
+            
+            local img_wrapper="<img id=\"block-image-${it_id}\" class=\"block-image\">"
+            if [[ "$child_content" == *"$img_wrapper"* ]]; then
+                local div_wrapper="<div id=\"block-image-${it_id}\" class=\"block-image-wrapper\">"
+                child_content="${child_content/$img_wrapper/$div_wrapper}"
+                child_content="${child_content/<\/img>/<\/div>}"
+            fi
+            local image_wrapper="<image id=\"block-image-${it_id}\" class=\"block-image\">"
+            if [[ "$child_content" == *"$image_wrapper"* ]]; then
+                local div_wrapper="<div id=\"block-image-${it_id}\" class=\"block-image-wrapper\">"
+                child_content="${child_content/$image_wrapper/$div_wrapper}"
+                child_content="${child_content/<\/image>/<\/div>}"
+            fi
+            
+            html+="        <item id=\"block-row-item-${i}-${r_id}\" class=\"${class_attr}\" data-pos=\"${it_pos}\"${inline_child_style}>"$'\n'
+            if [[ -n "$child_content" ]]; then
+                html+="${child_content}"
+            fi
+            html+="        </item>"$'\n'
+            ((i++))
+        done
+        html+="    </items>"$'\n'
+        html+="</row>"$'\n'
+        content+="${html}"
+    }  
+
+
+    __block_carousel() {
+        local bname="$1"
+        local _ref="$2[@]"
+        local -a my_buffer=("${!_ref}")
+        if [[ ${#my_buffer[@]} -eq 0 ]]; then return; fi
+        local c_id="rnd-$RANDOM"
+        local c_items="1" b_width="" b_style=""
+        local -a items=()
+        local -A child_html=()
+        local in_child="" child_name=""
+        local -a child_buffer=()
+        local current_key="" current_val="" b_line
+                 
+        for b_line in "${my_buffer[@]}"; do
+            if [[ -n "$in_child" ]]; then
+                if [[ "$b_line" =~ ^([[:space:]]*)\{\{[[:space:]]*block\.end[[:space:]]*\}\}[[:space:]]*$ ]]; then
+                    local c_id_item="" c_line
+                    for c_line in "${child_buffer[@]}"; do
+                        if [[ "$c_line" =~ ^[[:space:]]*::[[:space:]]*__id__[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+                            c_id_item="${BASH_REMATCH[1]}"
+                            c_id_item="${c_id_item#"${c_id_item%%[![:space:]]*}"}"
+                            c_id_item="${c_id_item%"${c_id_item##*[![:space:]]}"}"
+                            break
+                        fi
+                    done
+                    if [[ -n "$current_key" ]]; then
+                        current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+                        current_val="${current_val%"${current_val##*[![:space:]]}"}"
+                        if [[ "$current_key" == "__id__" ]]; then c_id="$current_val"
+                        elif [[ "$current_key" == "item" ]]; then items+=("${current_val#*id=}")
+                        elif [[ "$current_key" == "items" ]]; then c_items="$current_val"
+                        elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+                        elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"; fi
+                        current_key=""
+                    fi
+                    local old_content="$content"
+                    content=""
+                    if declare -F "__block_${child_name}" >/dev/null; then
+                        "__block_${child_name}" "$child_name" child_buffer
+                    else
+                        __block_core "$child_name" child_buffer
+                    fi
+                    if [[ -n "$c_id_item" ]]; then
+                        child_html["$c_id_item"]="$content"
+                    fi
+                    content="$old_content"
+                    in_child=""
+                else
+                    child_buffer+=("$b_line")
+                fi
+                continue
+            fi
+                         
+            if [[ "$b_line" =~ ^([[:space:]]*)\{\{[[:space:]]*block\.([a-zA-Z0-9_-]+)[[:space:]]*\}\}[[:space:]]*$ ]]; then
+                in_child="1"
+                child_name="${BASH_REMATCH[2]}"
+                child_buffer=()
+                if [[ -n "$current_key" ]]; then
+                    current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+                    current_val="${current_val%"${current_val##*[![:space:]]}"}"
+                    if [[ "$current_key" == "__id__" ]]; then c_id="$current_val"
+                    elif [[ "$current_key" == "item" ]]; then items+=("${current_val#*id=}")
+                    elif [[ "$current_key" == "items" ]]; then c_items="$current_val"
+                    elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+                    elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"; fi
+                    current_key=""
+                fi
+                continue
+            fi
+                         
+            if [[ "$b_line" =~ ^[[:space:]]*::[[:space:]]*([a-zA-Z0-9_-]+):[[:space:]]*(.*)$ ]]; then
+                if [[ -n "$current_key" ]]; then
+                    current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+                    current_val="${current_val%"${current_val##*[![:space:]]}"}"
+                    if [[ "$current_key" == "__id__" ]]; then c_id="$current_val"
+                    elif [[ "$current_key" == "item" ]]; then items+=("${current_val#*id=}")
+                    elif [[ "$current_key" == "items" ]]; then c_items="$current_val"
+                    elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+                    elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"; fi
+                fi
+                current_key="${BASH_REMATCH[1]}"
+                current_val="${BASH_REMATCH[2]}"
+                current_val="${current_val#"${current_val%%[![:space:]]*}"}"
+                current_val="${current_val%"${current_val##*[![:space:]]}"}"
+            else
+                if [[ -n "$current_key" ]]; then
+                    current_val+=$'\n'"$b_line"
+                fi
+            fi
+        done
+                 
+        if [[ -n "$current_key" ]]; then
+            current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+            current_val="${current_val%"${current_val##*[![:space:]]}"}"
+            if [[ "$current_key" == "__id__" ]]; then c_id="$current_val"
+            elif [[ "$current_key" == "item" ]]; then items+=("${current_val#*id=}")
+            elif [[ "$current_key" == "items" ]]; then c_items="$current_val"
+            elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+            elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"; fi
+        fi
+
+        local c_items_num="1"
+        local c_items_attr="1"
+        local raw_c_items="${c_items//&lt;/<}"
+        local stripped_items="${raw_c_items//[[:space:]]/}"
+        
+        if [[ "${stripped_items}" == "<="* ]]; then
+            local num_part="${stripped_items#<=}"
+            if [[ "$num_part" =~ ^[0-9]+$ ]]; then
+                c_items_num="$num_part"
+                c_items_attr="<=${c_items_num}"
+            fi
+        elif [[ "${stripped_items}" =~ ^[0-9]+$ ]]; then
+            c_items_num="${stripped_items}"
+            c_items_attr="${stripped_items}"
+        fi
+                 
+        __get_style_attr_r "$b_width" "$b_style"; local style_attr="$REPLY"
+        local html="<carousel id=\"block-carousel-${c_id}\" class=\"block-carousel\" data-items=\"${c_items_attr}\"${style_attr}>"$'\n'
+        html+="    <div class=\"carousel-wrapper\">"$'\n'
+        html+="        <button class=\"carousel-btn-prev\">Prev</button>"$'\n'
+        html+="        <slides id=\"block-carousel-slides-${c_id}\" class=\"block-carousel-slides\">"$'\n'
+                 
+        local i=1 it clean_it display_style
+        for it in "${items[@]}"; do
+            clean_it="${it//\"/}"
+            clean_it="${clean_it//\'/}"
+            clean_it="${clean_it%%,*}"
+            clean_it="${clean_it#"${clean_it%%[![:space:]]*}"}"
+            clean_it="${clean_it%"${clean_it##*[![:space:]]}"}"
+            display_style=""
+            [[ $i -gt $c_items_num ]] && display_style=" style=\"display: none;\""
+                         
+            html+="            <slide id=\"block-carousel-slide-${i}-${c_id}\" class=\"block-carousel-slide\"${display_style}>"$'\n'
+            if [[ -n "${child_html[$clean_it]:-}" ]]; then
+                html+="${child_html[$clean_it]}"
+            fi
+            html+="            </slide>"$'\n'
+            ((i++))
+        done
+        html+="        </slides>"$'\n'
+        html+="        <button class=\"carousel-btn-next\">Next</button>"$'\n'
+        html+="    </div>"$'\n'
+        html+="    <nav class=\"carousel-dots\">"$'\n'
+        local j active_class dots_count
+        dots_count=$(( (${#items[@]} + c_items_num - 1) / c_items_num ))
+        for ((j=0; j<dots_count; j++)); do
+            active_class=""
+            [[ $j -eq 0 ]] && active_class=" active"
+            html+="        <button class=\"carousel-dot${active_class}\" data-index=\"${j}\"></button>"$'\n'
+        done
+        html+="    </nav>"$'\n'
+        html+="</carousel>"$'\n'
+        content+="${html}"
+    }
+
+    __block_grid() {
+        local bname="$1"
+        local _ref="$2[@]"
+        local -a my_buffer=("${!_ref}")
+        if [[ ${#my_buffer[@]} -eq 0 ]]; then return; fi
+        local g_id="rnd-$RANDOM"
+        local g_gap="" b_width="" b_style=""
+        local -a grid_rows=()
+        local -A grid_child_html=()
+        local grid_in_child="" grid_child_name="" grid_child_indent=""
+        local -a grid_child_buffer=()
+        local current_key="" current_val="" b_line
+        
+        for b_line in "${my_buffer[@]}"; do
+            if [[ -n "$grid_in_child" ]]; then
+                if [[ "$b_line" =~ ^([[:space:]]*)\{\{[[:space:]]*block\.end[[:space:]]*\}\}[[:space:]]*$ ]] && [[ "${BASH_REMATCH[1]}" == "$grid_child_indent" ]]; then
+                    local c_id="" c_line
+                    for c_line in "${grid_child_buffer[@]}"; do
+                        if [[ "$c_line" =~ ^[[:space:]]*::[[:space:]]*__id__[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+                            c_id="${BASH_REMATCH[1]}"
+                            c_id="${c_id#"${c_id%%[![:space:]]*}"}"; c_id="${c_id%"${c_id##*[![:space:]]}"}"
+                            break
+                        fi
+                    done
+                    if [[ -n "$current_key" ]]; then
+                        current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+                        current_val="${current_val%"${current_val##*[![:space:]]}"}"
+                        if [[ "$current_key" == "__id__" ]]; then g_id="$current_val"
+                        elif [[ "$current_key" == "gap" ]]; then g_gap="$current_val"
+                        elif [[ "$current_key" == "row" ]]; then grid_rows+=("$current_val")
+                        elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+                        elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"; fi
+                        current_key=""
+                    fi
+                    local old_content="$content"
+                    content=""
+                    if declare -F "__block_${grid_child_name}" >/dev/null; then
+                        "__block_${grid_child_name}" "$grid_child_name" grid_child_buffer
+                    else
+                        __block_core "$grid_child_name" grid_child_buffer
+                    fi
+                    if [[ -n "$c_id" ]]; then
+                        grid_child_html["$c_id"]="$content"
+                    fi
+                    content="$old_content"
+                    grid_in_child=""
+                else
+                    grid_child_buffer+=("$b_line")
+                fi
+                continue
+            fi
+            
+            if [[ "$b_line" =~ ^([[:space:]]*)\{\{[[:space:]]*block\.([a-zA-Z0-9_-]+)[[:space:]]*\}\}[[:space:]]*$ ]]; then
+                grid_in_child="1"
+                grid_child_indent="${BASH_REMATCH[1]}"
+                grid_child_name="${BASH_REMATCH[2]}"
+                grid_child_buffer=()
+                if [[ -n "$current_key" ]]; then
+                    current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+                    current_val="${current_val%"${current_val##*[![:space:]]}"}"
+                    if [[ "$current_key" == "__id__" ]]; then g_id="$current_val"
+                    elif [[ "$current_key" == "gap" ]]; then g_gap="$current_val"
+                    elif [[ "$current_key" == "row" ]]; then grid_rows+=("$current_val")
+                    elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+                    elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"; fi
+                    current_key=""
+                fi
+                continue
+            fi
+            
+            if [[ "$b_line" =~ ^[[:space:]]*::[[:space:]]*([a-zA-Z0-9_-]+):[[:space:]]*(.*)$ ]]; then
+                if [[ -n "$current_key" ]]; then
+                    current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+                    current_val="${current_val%"${current_val##*[![:space:]]}"}"
+                    if [[ "$current_key" == "__id__" ]]; then g_id="$current_val"
+                    elif [[ "$current_key" == "gap" ]]; then g_gap="$current_val"
+                    elif [[ "$current_key" == "row" ]]; then grid_rows+=("$current_val")
+                    elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+                    elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"; fi
+                fi
+                current_key="${BASH_REMATCH[1]}"
+                current_val="${BASH_REMATCH[2]}"
+                current_val="${current_val#"${current_val%%[![:space:]]*}"}"
+                current_val="${current_val%"${current_val##*[![:space:]]}"}"
+            else
+                if [[ -n "$current_key" ]]; then
+                    current_val+=$'\n'"$b_line"
+                fi
+            fi
+        done
+        
+        if [[ -n "$current_key" ]]; then
+            current_val="${current_val#"${current_val%%[!$'\n\r']*}"}"
+            current_val="${current_val%"${current_val##*[![:space:]]}"}"
+            if [[ "$current_key" == "__id__" ]]; then g_id="$current_val"
+            elif [[ "$current_key" == "gap" ]]; then g_gap="$current_val"
+            elif [[ "$current_key" == "row" ]]; then grid_rows+=("$current_val")
+            elif [[ "$current_key" == "__width__" ]]; then b_width="$current_val"
+            elif [[ "$current_key" == "__style__" ]]; then b_style="$current_val"; fi
+        fi
+        
+        local rows_style=""
+        if [[ -n "$g_gap" ]]; then
+            if [[ "$g_gap" =~ ^[0-9]+$ ]]; then g_gap="${g_gap}px"; fi
+            rows_style=" style=\"gap: ${g_gap};\""
+        fi
+        
+        __get_style_attr_r "$b_width" "$b_style"; local style_attr="$REPLY"
+        local html="<grid id=\"block-grid-${g_id}\" class=\"block-grid\"${style_attr}>"$'\n'
+        html+="    <rows id=\"block-grid-rows-${g_id}\" class=\"block-grid-rows\"${rows_style}>"$'\n'
+        
+        local r r_id r_pos class_attr inline_child_style
+        for r in "${grid_rows[@]}"; do
+            r_id=""
+            r_pos=""
+            if [[ "$r" == *"="* ]]; then
+                local prev_IFS="$IFS"
+                IFS=','
+                local tokens=($r)
+                IFS="$prev_IFS"
+                local token
+                for token in "${tokens[@]}"; do
+                    token="${token#"${token%%[![:space:]]*}"}"
+                    token="${token%"${token##*[![:space:]]}"}"
+                    if [[ "$token" == id=* ]]; then
+                        r_id="${token#id=}"
+                    elif [[ "$token" == pos=* ]]; then
+                        r_pos="${token#pos=}"
+                    fi
+                done
+            else
+                r_id="$r"
+            fi
+            
+            r_id="${r_id//\"/}"
+            r_id="${r_id//\'/}"
+            r_id="${r_id#"${r_id%%[![:space:]]*}"}"
+            r_id="${r_id%"${r_id##*[![:space:]]}"}"
+            
+            r_pos="${r_pos//\"/}"
+            r_pos="${r_pos//\'/}"
+            r_pos="${r_pos#"${r_pos%%[![:space:]]*}"}"
+            r_pos="${r_pos%"${r_pos##*[![:space:]]}"}"
+            
+            class_attr="block-grid-row"
+            inline_child_style=""
+            
+            if [[ -n "$r_pos" ]]; then
+                class_attr+=" pos-${r_pos}"
+                if [[ "$r_pos" == "center" ]]; then inline_child_style=" style=\"display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center;\""
+                elif [[ "$r_pos" == "left" ]]; then inline_child_style=" style=\"display: flex; flex-direction: column; justify-content: flex-start; align-items: flex-start; text-align: left;\""
+                elif [[ "$r_pos" == "right" ]]; then inline_child_style=" style=\"display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-end; text-align: right;\""
+                fi
+            fi
+            
+            local child_content="${grid_child_html[$r_id]:-}"
+            local target_tag="<row id=\"block-row-${r_id}\" class=\"block-row\">"
+            
+            if [[ "$child_content" == *"$target_tag"* ]]; then
+                local new_tag="<row id=\"block-grid-row-${r_id}\" class=\"block-row ${class_attr}\" data-pos=\"${r_pos}\"${inline_child_style}>"
+                html+="${child_content/$target_tag/$new_tag}"
+            else
+                html+="        <row id=\"block-grid-row-${r_id}\" class=\"${class_attr}\" data-pos=\"${r_pos}\"${inline_child_style}>"$'\n'
+                html+="${child_content}"
+                html+="        </row>"$'\n'
+            fi
+        done
+        html+="    </rows>"$'\n'
+        html+="</grid>"$'\n'
+        content+="${html}"
+    }
+}

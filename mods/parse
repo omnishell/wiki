@@ -1,0 +1,1301 @@
+#! /bin/bash
+
+__parse__() {
+    __parse_item() {
+        local indent="$1" ltype="$2" item_content="$3" line_prefix=""
+        while (( list_depth > 0 )) && (( indent < LIST_INDENTS[list_depth-1] )); do
+            list_depth=$((list_depth - 1))
+            line_prefix+="</li></${LIST_TYPES[list_depth]}>"
+        done
+        if (( list_depth == 0 )) || (( indent > LIST_INDENTS[list_depth-1] )); then
+            LIST_INDENTS[$list_depth]="$indent"
+            LIST_TYPES[$list_depth]="$ltype"
+            list_depth=$((list_depth + 1))
+            line_prefix+="<${ltype}><li>"
+        elif (( indent == LIST_INDENTS[list_depth-1] )); then
+            if [[ "${LIST_TYPES[list_depth-1]}" != "$ltype" ]]; then
+                line_prefix+="</li></${LIST_TYPES[list_depth-1]}><${ltype}><li>"
+                LIST_TYPES[$list_depth-1]="$ltype"
+            else
+                line_prefix+="</li><li>"
+            fi
+        else
+            if [[ "${LIST_TYPES[list_depth-1]}" != "$ltype" ]]; then
+                line_prefix+="</li></${LIST_TYPES[list_depth-1]}><${ltype}><li>"
+                LIST_TYPES[$list_depth-1]="$ltype"
+            else
+                line_prefix+="</li><li>"
+            fi
+        fi
+        line="${line_prefix}${item_content}"
+    }
+    
+    __parse_ul() { __parse_item "$1" "ul" "$2"; }
+    __parse_ol() { __parse_item "$1" "ol" "$2"; }
+    
+    __parse_list() {
+        if (( list_depth > 0 )); then
+            while (( list_depth > 0 )); do
+                list_depth=$((list_depth - 1))
+                content+="</li></${LIST_TYPES[list_depth]}>"$'\n'
+            done
+            LIST_INDENTS=()
+            LIST_TYPES=()
+        fi
+    }
+
+    __parse_inline() {
+        if [[ "$line" == *'`'* ]]; then
+            line="${line//\\\`/$'\x1F'}"
+            while [[ "$line" == *'`'*'`'* ]]; do
+                local prefix="${line%%\`*}"
+                local rest="${line#*\`}"
+                local code="${rest%%\`*}"
+                local suffix="${rest#*\`}"
+                code="${code//&/$_amp}"
+                code="${code//</$_lt}"
+                code="${code//>/$_gt}"
+                masked_codes[$m_idx]="<inline>${code}</inline>"
+                line="${prefix}%%MASKED_${m_idx}%%${suffix}"
+                ((m_idx++))
+            done
+            line="${line//$'\x1F'/\`}"
+        fi
+    }
+
+    __parse_tex() {
+        if [[ "$line" == *"$"* ]]; then
+            local math_re='^([^$]*)\$([^$]+)\$(.*)$'
+            while [[ "$line" =~ $math_re ]]; do
+                local prefix="${BASH_REMATCH[1]}"
+                local math_code="${BASH_REMATCH[2]}"
+                local suffix="${BASH_REMATCH[3]}"
+                local cached_span="${LATEX_MEM_CACHE["inline:${math_code}"]:-}"
+                if [[ -n "$cached_span" ]]; then
+                    masked_codes[$m_idx]="$cached_span"
+                else
+                    local svg_output
+                    svg_output=$("$_WIKI_DIR/bin/latex" --stdout --inline --dpr 0.4 <<< "${math_code}\\rule{0pt}{0pt}")
+                    svg_output="${svg_output//rgba(0,0,0,1)/var(--fg)}"
+                    local min_y=0 height=0
+                    if [[ "$svg_output" =~ viewBox=[\"\']([0-9.-]+)[[:space:],]+([0-9.-]+)[[:space:],]+([0-9.-]+)[[:space:],]+([0-9.-]+)[\"\'] ]]; then
+                        min_y="${BASH_REMATCH[2]}"
+                        height="${BASH_REMATCH[4]}"
+                    fi
+                    local align="-10px"
+                    local baseline_re='.*<rect x="[0-9.-]+" y="([0-9.-]+)" width="0"'
+                    [[ "$svg_output" =~ $baseline_re ]] && align="${BASH_REMATCH[1]}pt - (${min_y}pt + ${height}pt) - 1px"
+                    cached_span="<span class=\"latex-inline\" style=\"vertical-align: calc(${align});\">${svg_output}</span>"
+                    LATEX_MEM_CACHE["inline:${math_code}"]="$cached_span"
+                    masked_codes[$m_idx]="$cached_span"
+                fi
+                line="${prefix}%%MASKED_${m_idx}%%${suffix}"
+                ((m_idx++))
+            done
+        fi
+    }
+
+    __parse_pre() {
+        if [[ "$line" == *"<pre"* && "$line" == *"</pre>"* ]]; then
+            local temp_line="$line"
+            while [[ "$temp_line" == *"<pre"* && "$temp_line" == *"</pre>"* ]]; do
+                local before_pre="${temp_line%%<pre*}"
+                local rest="${temp_line#*"$before_pre"}"
+                local full_pre="${rest%%</pre>*}</pre>"
+                local old_line="$temp_line"
+                
+                local open_tag="${full_pre%%>*}"
+                local inner_content="${full_pre#*>}"
+                inner_content="${inner_content%</pre>*}"
+                
+                inner_content="${inner_content//&/$_amp}"
+                inner_content="${inner_content//</$_lt}"
+                inner_content="${inner_content//>/$_gt}"
+                
+                masked_codes[$m_idx]="${open_tag}>${inner_content}</pre>"
+                temp_line="${temp_line/"$full_pre"/%%MASKED_${m_idx}%%}"
+                ((m_idx++))
+                if [[ "$temp_line" == "$old_line" ]]; then break; fi
+            done
+            line="$temp_line"
+        fi
+    }
+
+    __parse_strong() {
+        if [[ "$line" == *"**"* || "$line" == *"__"* ]]; then
+            while [[ "$line" == *"**"*"**"* ]]; do
+                line="${line/\*\*/<strong>}"
+                line="${line/\*\*/<\/strong>}"
+            done
+            while [[ "$line" == *"__"*"__"* ]]; do
+                line="${line/__/<strong>}"
+                line="${line/__/<\/strong>}"
+            done
+        fi
+    }   
+
+    __parse_underline() {
+        if [[ "$line" == *"++"* ]]; then
+            while [[ "$line" == *"++"*"++"* ]]; do
+                line="${line/\+\+/<ins>}"
+                line="${line/\+\+/<\/ins>}"
+            done
+        fi
+    }
+
+    __parse_em() {
+        if [[ "$line" == *"_"*"_"* ]]; then
+            local em_re='(^|[[:space:][:punct:]])_([a-zA-Z0-9][^_]+)_([[:space:][:punct:]]|$)'
+            while [[ "$line" =~ $em_re ]]; do
+                local full="${BASH_REMATCH[0]}" pre="${BASH_REMATCH[1]}" t_content="${BASH_REMATCH[2]}" post="${BASH_REMATCH[3]}"
+                if [[ "$t_content" == *"/"* || "$t_content" == *"="* ]]; then break; fi
+                local old_line="$line"
+                line="${line/"$full"/${pre}<em>${t_content}</em>${post}}"
+                if [[ "$line" == "$old_line" ]]; then break; fi
+            done
+        fi
+    }
+
+    __parse_refs() {
+        if [[ "$line" == *"{{"*":"*"}}"* ]]; then
+            local out_line="" rem="$line" pre inner topic rest raw_ref label ref_key
+            while [[ "$rem" == *"{{"*"}}"* ]]; do
+                pre="${rem%%\{\{*}"
+                rem="${rem#*\{\{}"
+                inner="${rem%%\}\}*}"
+                rem="${rem#*\}\}}"
+                if [[ "$inner" == *:* ]]; then
+                    local clean_in="${inner#"${inner%%[![:space:]]*}"}"
+                    clean_in="${clean_in%"${clean_in##*[![:space:]]}"}"
+                    topic="${clean_in%%:*}"
+                    if [[ -n "$topic" && -z "${topic//[a-zA-Z0-9_-]/}" ]]; then
+                        rest="${clean_in#*:}"
+                        if [[ "$rest" == *:* ]]; then
+                            raw_ref="${rest%%:*}"
+                            label="${rest#*:}"
+                        else
+                            raw_ref="$rest"
+                            label=""
+                        fi
+                        raw_ref="${raw_ref#"${raw_ref%%[![:space:]]*}"}"
+                        raw_ref="${raw_ref%"${raw_ref##*[![:space:]]}"}"
+                        if [[ -z "$label" ]]; then
+                            label="$raw_ref"
+                        else
+                            label="${label#"${label%%[![:space:]]*}"}"
+                            label="${label%"${label##*[![:space:]]}"}"
+                        fi
+                        if [[ "$topic" == "page" ]]; then
+                            out_line+="${pre}<a href=\"/${raw_ref//./\/}.html\">${label}</a>"
+                        else
+                            __slugify_r "$raw_ref"
+                            ref_key="$REPLY"
+                            out_line+="${pre}%%WIKI_REF:${topic}:${ref_key}:${label}%%"
+                        fi
+                        continue
+                    fi
+                fi
+                out_line+="${pre}{{${inner}}}"
+            done
+            line="${out_line}${rem}"
+        fi
+        if [[ "$line" == *"{{#"* || "$line" == *"{{="* ]]; then
+            local mark_re='\{\{\#([a-zA-Z0-9_.-]+)\}\}'
+            local anchor_re='\{\{\=([a-zA-Z0-9_.-]+)\}\}'
+            while [[ "$line" =~ $mark_re ]]; do
+                local full="${BASH_REMATCH[0]}"
+                local old_line="$line"
+                line="${line/"$full"/<span id=\"${BASH_REMATCH[1]}\" class=\"wiki-mark\"></span>}"
+                if [[ "$line" == "$old_line" ]]; then break; fi
+            done
+            while [[ "$line" =~ $anchor_re ]]; do
+                local full="${BASH_REMATCH[0]}"
+                local old_line="$line"
+                line="${line/"$full"/<a href=\"#${BASH_REMATCH[1]}\">${BASH_REMATCH[1]}</a>}"
+                if [[ "$line" == "$old_line" ]]; then break; fi
+            done
+        fi
+    }
+
+    __parse_links() {
+        if [[ "$line" == *"["* && "$line" == *"]("* ]]; then
+            local link_re='\[([^]]+)\]\(([^)]+)\)'
+            while [[ "$line" =~ $link_re ]]; do
+                local full="${BASH_REMATCH[0]}" l_text="${BASH_REMATCH[1]}" l_href="${BASH_REMATCH[2]}"
+                if [[ "$l_href" != http://* && "$l_href" != https://* ]]; then
+                    if [[ "$l_href" =~ ^(.*)\.(md|markdown|MD|MARKDOWN)([ \t#].*)?$ ]]; then
+                        l_href="${BASH_REMATCH[1]}.html${BASH_REMATCH[3]}"
+                    fi
+                fi
+                local old_line="$line"
+                line="${line/"$full"/<a href=\"${l_href}\">${l_text}</a>}"
+                if [[ "$line" == "$old_line" ]]; then break; fi
+            done
+        fi
+    }
+    
+    __parse_tag() {
+        if [[ "$line" == *"=="* ]]; then
+            while [[ "$line" =~ (^|[^=])=([a-zA-Z0-9_-]+)=(.*) ]]; do
+                local pre="${BASH_REMATCH[1]}"
+                local tag="${BASH_REMATCH[2]}"
+                local remainder="${BASH_REMATCH[3]}"
+                if [[ "$remainder" != *"=="* ]]; then break; fi
+                local content="${remainder%%==*}"
+                local full="${pre}=${tag}=${content}=="
+                line="${line/"$full"/${pre}<${tag}>${content}</${tag}>}"
+            done
+            while [[ "$line" == *"=="*"=="* ]]; do
+                line="${line/==/<tag>}"
+                line="${line/==/<\/tag>}"
+            done
+        fi
+    }
+
+    __parse_markdown() {
+        [[ "$line" != *[\`*_+{[\<=\$]* ]] && return 0
+        local -a masked_codes=()
+        local m_idx=0
+        __parse_pre
+        __parse_inline
+        __parse_tex
+        __parse_strong
+        __parse_underline
+        __parse_em
+        __parse_refs
+        __parse_links
+        local i
+        for (( i=0; i<m_idx; i++ )); do
+            line="${line//%%MASKED_${i}%%/${masked_codes[$i]}}"
+        done
+    }
+
+    __parse_block_field_r() {
+        local _field_ref="$1"
+        REPLY=""
+        [[ -z "$_field_ref" ]] && return 0
+        [[ "$_field_ref" == *$'\t'* ]] && _field_ref="${_field_ref//$'\t'/    }"
+        [[ "$_field_ref" == *$'\xC2\xA0'* ]] && _field_ref="${_field_ref//$'\xC2\xA0'/ }"
+        _field_ref="${_field_ref#"${_field_ref%%[! $'\n\r']*}"}"
+        _field_ref="${_field_ref%"${_field_ref##*[! $'\n\r']}"}"
+        [[ -z "$_field_ref" ]] && return 0
+        local bt=$'\x60'
+        local btt=$'\x60\x60\x60'
+        if [[ "$_field_ref" != *$'\n'* && "$_field_ref" != "::"* && "$_field_ref" != *"$btt"* && "$_field_ref" != *"$$"* && "$_field_ref" != *"block.tex"* && "$_field_ref" != *"block.code"* && "$_field_ref" != [-*+]\ * && "$_field_ref" != [0-9]*.\ * ]]; then
+            local l="$_field_ref"
+            if [[ "$l" == *["$bt"*_+\[\{\$]* ]]; then
+                local prefix rest inner suffix
+                l="${l//\\"$bt"/$'\x1F'}"
+                local -a m_codes=()
+                local m_i=0
+                while [[ "$l" == *"$bt"*"$bt"* ]]; do
+                    prefix="${l%%"$bt"*}"; rest="${l#*"$bt"}"
+                    inner="${rest%%"$bt"*}"; suffix="${rest#*"$bt"}"
+                    inner="${inner//&/${_amp:-&amp;}}"
+                    inner="${inner//</${_lt:-&lt;}}"
+                    inner="${inner//>/${_gt:-&gt;}}"
+                    m_codes[$m_i]="<inline>${inner}</inline>"
+                    l="${prefix}%%MASK${m_i}%%${suffix}"
+                    ((m_i++))
+                done
+                l="${l//$'\x1F'/$bt}"
+                if [[ "$l" == *"$"* ]]; then
+                    local temp_line="$line"
+                    local -a masked_codes=()
+                    local m_idx=0
+                    line="$l"
+                    __parse_tex
+                    l="$line"
+                    line="$temp_line"
+                    local k_m
+                    for (( k_m=0; k_m<m_idx; k_m++ )); do
+                        m_codes[$m_i]="${masked_codes[$k_m]}"
+                        l="${l//%%MASKED_${k_m}%%/%%MASK${m_i}%%}"
+                        ((m_i++))
+                    done
+                fi
+                while [[ "$l" == *\*\**\*\** ]]; do
+                    prefix="${l%%\*\**}"; rest="${l#*\*\*}"
+                    inner="${rest%%\*\**}"; suffix="${rest#*\*\*}"
+                    l="${prefix}<strong>${inner}</strong>${suffix}"
+                done
+                while [[ "$l" == *_*_* ]]; do
+                    prefix="${l%%_*}"; rest="${l#*_}"
+                    inner="${rest%%_*}"; suffix="${rest#*_}"
+                    l="${prefix}<em>${inner}</em>${suffix}"
+                done
+                while [[ "$l" == *"++"*"++"* ]]; do
+                    local old_l="$l"
+                    l="${l/\+\+/<ins>}"; l="${l/\+\+/<\/ins>}"
+                    [[ "$l" == "$old_l" ]] && break
+                done
+                if [[ "$l" == *"["* && "$l" == *"]("* ]]; then
+                    local link_re='\[([^]]+)\]\(([^)]+)\)'
+                    local ext_re='^(.*)\.(md|markdown|MD|MARKDOWN)([ \t#].*)?$'
+                    while [[ "$l" =~ $link_re ]]; do
+                        local full="${BASH_REMATCH[0]}" l_text="${BASH_REMATCH[1]}" l_href="${BASH_REMATCH[2]}"
+                        if [[ "$l_href" != http://* && "$l_href" != https://* && "$l_href" =~ $ext_re ]]; then
+                            l_href="${BASH_REMATCH[1]}.html${BASH_REMATCH[3]}"
+                        fi
+                        l="${l/"$full"/<a href=\"${l_href}\">${l_text}</a>}"
+                    done
+                fi
+                if [[ "$l" == *"{{"* ]]; then
+                    local temp_line="$line"
+                    line="$l"
+                    __parse_refs
+                    l="$line"
+                    line="$temp_line"
+                fi
+                local i
+                for (( i=0; i<m_i; i++ )); do
+                    l="${l//%%MASK${i}%%/${m_codes[$i]}}"
+                done
+            fi
+            REPLY="$l"
+            return 0
+        fi
+        local nl=$'\n'
+        local -a field_lines=()
+        local old_ifs="$IFS"
+        local body_tmp="${_field_ref//$'\n'/$'\n'$'\x02'}"
+        set -f
+        IFS=$'\n'
+        field_lines=($body_tmp)
+        IFS="$old_ifs"
+        set +f
+        local base_indent=-1
+        local l stripped_ws ind
+        local idx
+        for idx in "${!field_lines[@]}"; do
+            l="${field_lines[$idx]#$'\x02'}"
+            l="${l%$'\r'}"
+            field_lines[$idx]="$l"
+            stripped_ws="${l#"${l%%[![:space:]]*}"}"
+            if [[ -n "$stripped_ws" ]]; then
+                ind=$(( ${#l} - ${#stripped_ws} ))
+                if (( base_indent == -1 || ind < base_indent )); then
+                    base_indent=$ind
+                fi
+            fi
+        done
+        local out=""
+        local in_inner=0 in_html_pre=0 list_depth=0 after_block=0 first_code_line=0 code_lang=""
+        local -a tex_lines=()
+        local prefix rest inner suffix l_trim r_trim
+        local -a LIST_INDENTS=() LIST_TYPES=()
+        local list_item_re='^([[:space:]]*)([-*+]|[0-9]+\.)[[:space:]]+(.*)$'
+        local link_re='\[([^]]+)\]\(([^)]+)\)'
+        local ext_re='^(.*)\.(md|markdown|MD|MARKDOWN)([ \t#].*)?$'
+        for l in "${field_lines[@]}"; do
+            if (( base_indent > 0 )); then
+                if [[ -n "${l#"${l%%[![:space:]]*}"}" ]]; then
+                    l="${l:base_indent}"
+                fi
+            fi
+            if (( in_inner == 0 )); then
+                l_trim="${l#"${l%%[![:space:]]*}"}"
+                if [[ "$l_trim" == "::"* ]]; then
+                    l="${l_trim#::}"
+                    [[ "$l" == [[:blank:]]* ]] && l="${l:1}"
+                    l_trim="${l#"${l%%[![:space:]]*}"}"
+                fi
+                r_trim="${l_trim%"${l_trim##*[![:space:]]}"}"
+                if [[ "$r_trim" == "{{"*"block.code"*"}}" ]]; then
+                    local inner_c="${r_trim#\{\{}"
+                    inner_c="${inner_c%\}\}}"
+                    inner_c="${inner_c#"${inner_c%%[![:space:]]*}"}"
+                    inner_c="${inner_c%"${inner_c##*[![:space:]]}"}"
+                    if [[ "$inner_c" == "block.code"* ]]; then
+                        while (( list_depth > 0 )); do
+                            list_depth=$((list_depth - 1))
+                            out+="</li></${LIST_TYPES[list_depth]}>"
+                        done
+                        LIST_INDENTS=()
+                        LIST_TYPES=()
+                        out="${out%"${out##*[!$'\n']}"}"
+                        in_inner=2
+                        first_code_line=1
+                        local args="${inner_c#block.code}"
+                        local lang=""
+                        if [[ "$args" == *"lang="* ]]; then
+                            local tmp="${args##*lang=}"
+                            tmp="${tmp#\"}"
+                            tmp="${tmp#\'}"
+                            lang="${tmp%%[!a-zA-Z0-9_+-#]*}"
+                        fi
+                        local classes="hljs"
+                        if [[ -n "$lang" && "$lang" != "plaintext" && "$lang" != "none" ]]; then
+                            classes+=" language-${lang}"
+                        else
+                            classes+=" nohighlight"
+                        fi
+                        if [[ "$args" == *"numbered=true"* ]]; then
+                            classes+=" line-numbers"
+                        fi
+                        out+="<pre><code class=\"${classes}\">"
+                        continue
+                    fi
+                fi
+                if [[ "$r_trim" == "{{"*"block.tex"*"}}" ]]; then
+                    local inner_t="${r_trim#\{\{}"
+                    inner_t="${inner_t%\}\}}"
+                    inner_t="${inner_t#"${inner_t%%[![:space:]]*}"}"
+                    inner_t="${inner_t%"${inner_t##*[![:space:]]}"}"
+                    if [[ "$inner_t" == "block.tex" ]]; then
+                        while (( list_depth > 0 )); do
+                            list_depth=$((list_depth - 1))
+                            out+="</li></${LIST_TYPES[list_depth]}>"
+                        done
+                        LIST_INDENTS=()
+                        LIST_TYPES=()
+                        out="${out%"${out##*[!$'\n']}"}"
+                        in_inner=3
+                        tex_lines=()
+                        continue
+                    fi
+                fi
+                if [[ "$r_trim" == "$$"* ]]; then
+                    while (( list_depth > 0 )); do
+                        list_depth=$((list_depth - 1))
+                        out+="</li></${LIST_TYPES[list_depth]}>"
+                    done
+                    LIST_INDENTS=()
+                    LIST_TYPES=()
+                    out="${out%"${out##*[!$'\n']}"}"
+                    if [[ "$r_trim" == "$$" ]]; then
+                        in_inner=4
+                        tex_lines=()
+                        continue
+                    elif [[ "$r_trim" == "$$"*"$$" && ${#r_trim} -gt 4 ]]; then
+                        local tex_content="${r_trim#\$\$}"
+                        tex_content="${tex_content%\$\$}"
+                        local svg_output="${LATEX_MEM_CACHE["block:${tex_content}"]:-}"
+                        if [[ -z "$svg_output" ]]; then
+                            svg_output=$("$_WIKI_DIR/bin/latex" --stdout --dpr 0.4 <<< "$tex_content")
+                            svg_output="${svg_output//rgba(0,0,0,1)/var(--fg)}"
+                            LATEX_MEM_CACHE["block:${tex_content}"]="$svg_output"
+                        fi
+                        out+="<div class=\"latex\">${svg_output}</div>"
+                        after_block=1
+                        continue
+                    fi
+                fi
+                if [[ "$l_trim" == "$btt"* ]]; then
+                    local fence_rest="${l_trim#"$btt"}"
+                    fence_rest="${fence_rest%"${fence_rest##*[![:space:]]}"}"
+                    if [[ -z "${fence_rest//[a-zA-Z0-9_+-]/}" ]]; then
+                        while (( list_depth > 0 )); do
+                            list_depth=$((list_depth - 1))
+                            out+="</li></${LIST_TYPES[list_depth]}>"
+                        done
+                        LIST_INDENTS=()
+                        LIST_TYPES=()
+                        out="${out%"${out##*[!$'\n']}"}"
+                        in_inner=1
+                        first_code_line=1
+                        code_lang="$fence_rest"
+                        local classes="hljs"
+                        if [[ -n "$code_lang" && "$code_lang" != "plaintext" && "$code_lang" != "none" ]]; then
+                            classes+=" language-${code_lang}"
+                        else
+                            classes+=" nohighlight"
+                        fi
+                        out+="<pre><code class=\"${classes}\">"
+                        continue
+                    fi
+                fi
+                if (( in_html_pre == 1 )); then
+                    if [[ "$l" == *"</pre>"* ]]; then
+                        in_html_pre=0
+                        after_block=1
+                    fi
+                    out+="${out:+$nl}$l"
+                elif [[ "$l" == *"<pre"* && "$l" != *"</pre>"* ]]; then
+                    out="${out%"${out##*[!$'\n']}"}"
+                    in_html_pre=1
+                    out+="$l"
+                else
+                    local is_list=0 indent="" marker=""
+                    case "$l_trim" in
+                        [-*+]\ *|[0-9]*.\ *)
+                            if [[ "$l" =~ $list_item_re ]]; then
+                                is_list=1
+                                indent="${#BASH_REMATCH[1]}"
+                                marker="${BASH_REMATCH[2]}"
+                                l="${BASH_REMATCH[3]}"
+                            fi
+                            ;;
+                    esac
+                    if (( is_list == 0 && list_depth > 0 )); then
+                        if [[ -z "$l_trim" ]]; then
+                            continue
+                        fi
+                        if [[ "$l" == "$l_trim" ]]; then
+                            while (( list_depth > 0 )); do
+                                list_depth=$((list_depth - 1))
+                                out+="</li></${LIST_TYPES[list_depth]}>"
+                            done
+                            LIST_INDENTS=()
+                            LIST_TYPES=()
+                            after_block=1
+                        fi
+                    fi
+                    if (( is_list == 0 && after_block == 1 )); then
+                        [[ -z "$l_trim" ]] && continue
+                    fi
+                    if [[ "$l" == *["$bt"*_+\[\{\$]* ]]; then
+                        l="${l//\\"$bt"/$'\x1F'}"
+                        local -a m_codes=()
+                        local m_i=0
+                        while [[ "$l" == *"$bt"*"$bt"* ]]; do
+                            prefix="${l%%"$bt"*}"; rest="${l#*"$bt"}"
+                            inner="${rest%%"$bt"*}"; suffix="${rest#*"$bt"}"
+                            inner="${inner//&/${_amp:-&amp;}}"
+                            inner="${inner//</${_lt:-&lt;}}"
+                            inner="${inner//>/${_gt:-&gt;}}"
+                            m_codes[$m_i]="<inline>${inner}</inline>"
+                            l="${prefix}%%MASK${m_i}%%${suffix}"
+                            ((m_i++))
+                        done
+                        l="${l//$'\x1F'/$bt}"
+                        if [[ "$l" == *"$"* ]]; then
+                            local temp_line="$line"
+                            local -a masked_codes=()
+                            local m_idx=0
+                            line="$l"
+                            __parse_tex
+                            l="$line"
+                            line="$temp_line"
+                            local k_m
+                            for (( k_m=0; k_m<m_idx; k_m++ )); do
+                                m_codes[$m_i]="${masked_codes[$k_m]}"
+                                l="${l//%%MASKED_${k_m}%%/%%MASK${m_i}%%}"
+                                ((m_i++))
+                            done
+                        fi
+                        while [[ "$l" == *\*\**\*\** ]]; do
+                            prefix="${l%%\*\**}"; rest="${l#*\*\*}"
+                            inner="${rest%%\*\**}"; suffix="${rest#*\*\*}"
+                            l="${prefix}<strong>${inner}</strong>${suffix}"
+                        done
+                        while [[ "$l" == *_*_* ]]; do
+                            prefix="${l%%_*}"; rest="${l#*_}"
+                            inner="${rest%%_*}"; suffix="${rest#*_}"
+                            l="${prefix}<em>${inner}</em>${suffix}"
+                        done
+                        while [[ "$l" == *"++"*"++"* ]]; do
+                            local old_l="$l"
+                            l="${l/\+\+/<ins>}"
+                            l="${l/\+\+/<\/ins>}"
+                            if [[ "$l" == "$old_l" ]]; then break; fi
+                        done
+                        if [[ "$l" == *"["* && "$l" == *"]("* ]]; then
+                            while [[ "$l" =~ $link_re ]]; do
+                                local full="${BASH_REMATCH[0]}" l_text="${BASH_REMATCH[1]}" l_href="${BASH_REMATCH[2]}"
+                                if [[ "$l_href" != http://* && "$l_href" != https://* ]]; then
+                                    if [[ "$l_href" =~ $ext_re ]]; then
+                                        l_href="${BASH_REMATCH[1]}.html${BASH_REMATCH[3]}"
+                                    fi
+                                fi
+                                l="${l/"$full"/<a href=\"${l_href}\">${l_text}</a>}"
+                            done
+                        fi
+                        if [[ "$l" == *"{{"* ]]; then
+                            local temp_line="$line"
+                            line="$l"
+                            __parse_refs
+                            l="$line"
+                            line="$temp_line"
+                        fi
+                        local i
+                        for (( i=0; i<m_i; i++ )); do
+                            l="${l//%%MASK${i}%%/${m_codes[$i]}}"
+                        done
+                    fi
+                    if (( is_list == 1 )); then
+                        after_block=0
+                        local ltype="ul"
+                        [[ "$marker" == [0-9]* ]] && ltype="ol"
+                        if (( list_depth == 0 )); then
+                            out="${out%"${out##*[!$'\n']}"}"
+                            LIST_INDENTS[$list_depth]="$indent"
+                            LIST_TYPES[$list_depth]="$ltype"
+                            list_depth=$((list_depth + 1))
+                            out+="<${ltype}><li>${l}"
+                        elif (( indent > LIST_INDENTS[list_depth-1] )); then
+                            LIST_INDENTS[$list_depth]="$indent"
+                            LIST_TYPES[$list_depth]="$ltype"
+                            list_depth=$((list_depth + 1))
+                            out+="<${ltype}><li>${l}"
+                        else
+                            while (( list_depth > 0 && indent < LIST_INDENTS[list_depth-1] )); do
+                                list_depth=$((list_depth - 1))
+                                out+="</li></${LIST_TYPES[list_depth]}>"
+                            done
+                            if (( list_depth == 0 )); then
+                                LIST_INDENTS[$list_depth]="$indent"
+                                LIST_TYPES[$list_depth]="$ltype"
+                                list_depth=$((list_depth + 1))
+                                out+="<${ltype}><li>${l}"
+                            elif [[ "${LIST_TYPES[list_depth-1]}" != "$ltype" ]]; then
+                                out+="</li></${LIST_TYPES[list_depth-1]}><${ltype}><li>${l}"
+                                LIST_TYPES[$list_depth-1]="$ltype"
+                            else
+                                out+="</li><li>${l}"
+                            fi
+                        fi
+                    else
+                        if (( after_block == 1 )); then
+                            out+="$l"
+                            after_block=0
+                        else
+                            out+="${out:+$nl}$l"
+                        fi
+                    fi
+                fi
+            elif (( in_inner == 1 )); then
+                l_trim="${l#"${l%%[![:space:]]*}"}"
+                if [[ "$l_trim" == "::"* ]]; then
+                    l="${l_trim#::}"
+                    [[ "$l" == [[:blank:]]* ]] && l="${l:1}"
+                fi
+                if [[ "${l//[[:space:]]/}" == "$btt" ]]; then
+                    in_inner=0
+                    out+="</code></pre>"
+                    after_block=1
+                else
+                    l="${l//&/$_amp}"; l="${l//</$_lt}"; l="${l//>/$_gt}"
+                    if (( first_code_line == 1 )); then
+                        out+="$l"
+                        first_code_line=0
+                    else
+                        out+="$nl$l"
+                    fi
+                fi
+            elif (( in_inner == 2 )); then
+                l_trim="${l#"${l%%[![:space:]]*}"}"
+                if [[ "$l_trim" == "::"* ]]; then
+                    l="${l_trim#::}"
+                    [[ "$l" == [[:blank:]]* ]] && l="${l:1}"
+                    l_trim="${l#"${l%%[![:space:]]*}"}"
+                fi
+                r_trim="${l_trim%"${l_trim##*[![:space:]]}"}"
+                if [[ "$r_trim" == "{{"*"block.end"*"}}" ]]; then
+                    in_inner=0
+                    out+="</code></pre>"
+                    after_block=1
+                else
+                    l="${l//&/$_amp}"; l="${l//</$_lt}"; l="${l//>/$_gt}"
+                    if (( first_code_line == 1 )); then
+                        out+="$l"
+                        first_code_line=0
+                    else
+                        out+="$nl$l"
+                    fi
+                fi
+            elif (( in_inner == 3 )); then
+                l_trim="${l#"${l%%[![:space:]]*}"}"
+                if [[ "$l_trim" == "::"* ]]; then
+                    l="${l_trim#::}"
+                    [[ "$l" == [[:blank:]]* ]] && l="${l:1}"
+                    l_trim="${l#"${l%%[![:space:]]*}"}"
+                fi
+                r_trim="${l_trim%"${l_trim##*[![:space:]]}"}"
+                if [[ "$r_trim" == "{{"*"block.end"*"}}" ]]; then
+                    in_inner=0
+                    local OIFS="$IFS"; IFS=$'\n'
+                    local tex_content="${tex_lines[*]}"
+                    IFS="$OIFS"
+                    local svg_output="${LATEX_MEM_CACHE["block:${tex_content}"]:-}"
+                    if [[ -z "$svg_output" ]]; then
+                        svg_output=$("$_WIKI_DIR/bin/latex" --stdout --dpr 0.4 <<< "$tex_content")
+                        svg_output="${svg_output//rgba(0,0,0,1)/var(--fg)}"
+                        LATEX_MEM_CACHE["block:${tex_content}"]="$svg_output"
+                    fi
+                    out+="<div class=\"latex\">${svg_output}</div>"
+                    after_block=1
+                else
+                    tex_lines+=("$l")
+                fi
+            elif (( in_inner == 4 )); then
+                l_trim="${l#"${l%%[![:space:]]*}"}"
+                if [[ "$l_trim" == "::"* ]]; then
+                    l="${l_trim#::}"
+                    [[ "$l" == [[:blank:]]* ]] && l="${l:1}"
+                    l_trim="${l#"${l%%[![:space:]]*}"}"
+                fi
+                r_trim="${l_trim%"${l_trim##*[![:space:]]}"}"
+                if [[ "$r_trim" == "$$" ]]; then
+                    in_inner=0
+                    local OIFS="$IFS"; IFS=$'\n'
+                    local tex_content="${tex_lines[*]}"
+                    IFS="$OIFS"
+                    local svg_output="${LATEX_MEM_CACHE["block:${tex_content}"]:-}"
+                    if [[ -z "$svg_output" ]]; then
+                        svg_output=$("$_WIKI_DIR/bin/latex" --stdout --dpr 0.4 <<< "$tex_content")
+                        svg_output="${svg_output//rgba(0,0,0,1)/var(--fg)}"
+                        LATEX_MEM_CACHE["block:${tex_content}"]="$svg_output"
+                    fi
+                    out+="<div class=\"latex\">${svg_output}</div>"
+                    after_block=1
+                else
+                    tex_lines+=("$l")
+                fi
+            fi
+        done
+        if (( list_depth > 0 )); then
+            while (( list_depth > 0 )); do
+                list_depth=$((list_depth - 1))
+                out+="</li></${LIST_TYPES[list_depth]}>"
+            done
+            LIST_INDENTS=()
+            LIST_TYPES=()
+        fi
+        REPLY="$out"
+        return 0
+    }    
+
+    __parse_block_field() {
+        __parse_block_field_r "$@"
+        printf "%s" "$REPLY"
+    }
+
+    __parse_code() {
+        if (( in_code_block == 1 )); then
+            local l_trim="${line#"${line%%[![:space:]]*}"}"
+            l_trim="${l_trim%"${l_trim##*[![:space:]]}"}"
+            if [[ "$l_trim" == "{{"*"block.end"*"}}" ]]; then
+                content+="</code></pre>"$'\n'
+                in_code_block=0
+                ignore_next_empty=1
+            else
+                local safe_line="${line//&/$_amp}"
+                safe_line="${safe_line//</$_lt}"
+                safe_line="${safe_line//>/$_gt}"
+                content+="${safe_line}"$'\n'
+            fi
+            return 0
+        fi
+        if [[ -z "$in_custom_block" ]]; then
+            local l_trim="${line#"${line%%[![:space:]]*}"}"
+            l_trim="${l_trim%"${l_trim##*[![:space:]]}"}"
+            if [[ "$l_trim" == "{{"*"block.code"*"}}" ]]; then
+                (( list_depth > 0 )) && __parse_list
+                content="${content%<br><br>$'\n'}"
+                in_code_block=1
+                local args="${l_trim#*block.code}"
+                args="${args%"}}"}"
+                local lang=""
+                if [[ "$args" == *"lang="* ]]; then
+                    local tmp="${args##*lang=}"
+                    lang="${tmp%%[!a-zA-Z0-9_+-#]*}"
+                fi
+                local classes="hljs"
+                local has_lang=0
+                if [[ -n "$lang" && "$lang" != "plaintext" && "$lang" != "none" ]]; then
+                    classes+=" language-${lang}"
+                    has_lang=1
+                else
+                    classes+=" nohighlight"
+                fi
+                if [[ "$args" == *"numbered=true"* ]]; then
+                    classes+=" line-numbers"
+                fi
+                if [[ $has_lang -eq 1 ]]; then
+                    content+="<pre><code class=\"${classes}\">"$'\n'
+                else
+                    content+="<pre><code class=\"${classes}\">"
+                fi
+                return 0
+            fi
+        fi
+        return 1
+    }
+
+    __parse_html() {
+        if [[ -n "$in_custom_block" ]]; then return 1; fi
+        if (( in_html_pre == 1 )); then
+            if [[ "$line" == *"</pre>"* ]]; then
+                in_html_pre=0
+                local before_close="${line%%</pre>*}"
+                local after_close="${line#*</pre>}"
+                
+                before_close="${before_close//&/$_amp}"
+                before_close="${before_close//</$_lt}"
+                before_close="${before_close//>/$_gt}"
+                
+                content+="${before_close}</pre>${after_close}"$'\n'
+            else
+                local safe_line="$line"
+                safe_line="${safe_line//&/$_amp}"
+                safe_line="${safe_line//</$_lt}"
+                safe_line="${safe_line//>/$_gt}"
+                
+                content+="${safe_line}"$'\n'
+            fi
+            return 0
+        fi
+        if [[ "$line" == *"<pre"* && "$line" != *"</pre>"* ]]; then
+            in_html_pre=1
+            local open_tag="${line%%>*}"
+            local after_open="${line#*>}"
+            
+            after_open="${after_open//&/$_amp}"
+            after_open="${after_open//</$_lt}"
+            after_open="${after_open//>/$_gt}"
+            
+            content+="${open_tag}>${after_open}"$'\n'
+            return 0
+        fi
+        return 1
+    }
+
+    __parse_blocks() {
+        local l_trim="${line#"${line%%[![:space:]]*}"}"
+        local curr_indent="${line:0:${#line}-${#l_trim}}"
+        if [[ -n "$in_custom_block" ]]; then
+            local check_trim="$l_trim"
+            if [[ "$check_trim" == "::"* ]]; then
+                local after_c="${check_trim#::}"
+                after_c="${after_c#"${after_c%%[![:space:]]*}"}"
+                [[ "$after_c" == "{{"*"}}"* ]] && check_trim="$after_c"
+            fi
+            if [[ "$check_trim" == "{{"*"}}"* ]]; then
+                local r_trim="${check_trim%"${check_trim##*[![:space:]]}"}"
+                if [[ "$r_trim" == "{{"*"}}" ]]; then
+                    local inner="${r_trim#\{\{}"
+                    inner="${inner%\}\}}"
+                    inner="${inner#"${inner%%[![:space:]]*}"}"
+                    inner="${inner%"${inner##*[![:space:]]}"}"
+                    if [[ "$inner" == "block.end" ]]; then
+                        if (( ${custom_block_depth:-0} > 0 )); then
+                            (( custom_block_depth-- ))
+                        elif [[ "$curr_indent" == "$custom_block_indent" ]]; then
+                            case "$in_custom_block" in
+                                def) __block_core "def" custom_block_buffer ;;
+                                table) __block_table ;;
+                                diagram) __block_diagram ;;
+                                hide) __block_hide ;;
+                                row) __block_row "row" custom_block_buffer ;;
+                                carousel) __block_carousel "carousel" custom_block_buffer ;;
+                                card) __block_card "card" custom_block_buffer ;;
+                                buttons) __block_buttons "buttons" custom_block_buffer ;;
+                                text) __block_text "text" custom_block_buffer ;;
+                                image) __block_image "image" custom_block_buffer ;;
+                                grid) __block_grid "grid" custom_block_buffer ;;
+                                plain) __block_plain "plain" custom_block_buffer ;;
+                                pre) __block_pre "pre" custom_block_buffer ;;
+                                tex) __block_tex "tex" custom_block_buffer ;;
+                                quote) __block_quote "quote" custom_block_buffer ;;
+                                globals|comment) : ;;
+                                blockquote) content+="</blockquote>"$'\n' ;;
+                                *)
+                                    if [[ -n "${WIKI_BLOCKS[$in_custom_block]:-}" ]]; then
+                                        content+="</div>"$'\n'
+                                    elif declare -F "__block_${in_custom_block}" >/dev/null; then
+                                        "__block_${in_custom_block}" "$in_custom_block" custom_block_buffer
+                                    else
+                                        __block_core "$in_custom_block" custom_block_buffer
+                                    fi
+                                    ;;
+                            esac
+                            in_custom_block=""; custom_block_indent=""; custom_block_depth=0; ignore_next_empty=1; return 0
+                        fi
+                    elif [[ "$inner" == "block."* && "$in_custom_block" != "row" && "$in_custom_block" != "carousel" && "$in_custom_block" != "grid" && "$in_custom_block" != "text" ]]; then
+                        (( custom_block_depth++ ))
+                    fi
+                fi
+            fi
+            case "$in_custom_block" in
+                table) table_buffer+=("$line"); return 0 ;;
+                diagram) diagram_buffer+=("$line"); return 0 ;;
+                hide) hide_buffer+=("$line"); return 0 ;;
+                globals|comment)
+                    if [[ "$in_custom_block" == "globals" && "$l_trim" == "::"* ]]; then
+                        local after_col="${l_trim#::}"
+                        after_col="${after_col#"${after_col%%[![:space:]]*}"}"
+                        if [[ "$after_col" == *:* ]]; then
+                            local gk="${after_col%%:*}"
+                            local gv="${after_col#*:}"
+                            gv="${gv#"${gv%%[![:space:]]*}"}"
+                            gv="${gv%"${gv##*[![:space:]]}"}"
+                            if [[ "$gk" == "thumb" && "$gv" == "./"* ]]; then
+                                local dir_path="${current_dir//./\/}"
+                                [[ "$dir_path" == "/" ]] && dir_path=""
+                                gv="/_assets${dir_path:+/$dir_path}/${gv#./}"
+                                gv="${gv%.*}.webp"
+                            fi
+                            PAGE_VARS["page.$gk"]="$gv"
+                        fi
+                    fi
+                    return 0
+                    ;;
+                *)
+                    if [[ -n "${WIKI_BLOCKS[$in_custom_block]:-}" ]]; then
+                        content+="$line"$'\n'
+                        return 0
+                    fi
+                    custom_block_buffer+=("$line")
+                    return 0
+                    ;;
+            esac
+        else
+            if [[ "$l_trim" == "{{"*"block."* && "$l_trim" == *"}}"* ]]; then
+                local r_trim="${l_trim%"${l_trim##*[![:space:]]}"}"
+                if [[ "$r_trim" == "{{"*"}}" ]]; then
+                    local inner="${r_trim#\{\{}"
+                    inner="${inner%\}\}}"
+                    inner="${inner#"${inner%%[![:space:]]*}"}"
+                    inner="${inner%"${inner##*[![:space:]]}"}"
+                    if [[ "$inner" == "block."* ]]; then
+                        local bname="${inner#block.}"
+                        if [[ -n "$bname" && -z "${bname//[a-zA-Z0-9_-]/}" ]]; then
+                            (( list_depth > 0 )) && __parse_list
+                            content="${content%<br><br>$'\n'}"
+                            in_custom_block="$bname"
+                            custom_block_indent="$curr_indent"
+                            custom_block_depth=0
+                            case "$bname" in
+                                table) table_buffer=() ;;
+                                diagram) diagram_buffer=() ;;
+                                hide) hide_buffer=() ;;
+                                globals|comment) : ;;
+                                *)
+                                    if [[ -n "${WIKI_BLOCKS[$bname]:-}" ]]; then
+                                        content+="<div class=\"${WIKI_BLOCKS[$bname]}\">"$'\n'
+                                    else
+                                        custom_block_buffer=()
+                                    fi
+                                    ;;
+                            esac
+                            return 0
+                        fi
+                    fi
+                fi
+            fi
+        fi
+        return 1
+    }  
+
+    __parse_vars() {
+        if [[ "$line" == *"{{"* ]]; then
+            if [[ "$line" =~ ^\s*\{\{\ *toc\ *\}\}\s*$ ]]; then line="{{TOC_PLACEHOLDER}}"; set_ignore_this_turn=1; fi
+        fi
+    }
+
+    __parse_headers() {
+        if [[ "$line" == "#"* ]]; then
+            if [[ "$line" =~ ^(#{1,6})(\{([^}]+)\})?[[:space:]]+(.*)$ ]]; then
+                (( list_depth > 0 )) && __parse_list
+                local h_level="${#BASH_REMATCH[1]}"
+                local attr_block="${BASH_REMATCH[3]}"
+                local h_text="${BASH_REMATCH[4]}"
+                local style_str=""
+                
+                if [[ -n "$attr_block" ]]; then
+                    local IFS_old="$IFS"
+                    IFS=','
+                    local attrs=($attr_block)
+                    IFS="$IFS_old"
+                    local attr k v
+                    for attr in "${attrs[@]}"; do
+                        attr="${attr#"${attr%%[![:space:]]*}"}"
+                        attr="${attr%"${attr##*[![:space:]]}"}"
+                        k="${attr%%=*}"
+                        v="${attr#*=}"
+                        [[ "$k" == "align" ]] && k="text-align"
+                        style_str+="${k}: ${v}; "
+                    done
+                    [[ -n "$style_str" ]] && style_str=" style=\"${style_str% }\""
+                fi
+                
+                local slug="${h_text,,}"
+                slug="${slug// /_}"; slug="${slug//[^a-z0-9_-]/}"
+                line="<h${h_level} id=\"${slug}\"${style_str}>${h_text}</h${h_level}>"
+                TOC_HTML+="<li class=\"toc-h${h_level}\"><a href=\"#${slug}\">${h_text}</a></li>"$'\n'
+                set_ignore_this_turn=1
+            
+            elif [[ "$line" =~ ^#\!(\{([^}]+)\})?[[:space:]]+(.*)$ ]]; then
+                local attr_block="${BASH_REMATCH[2]}"
+                local h_text="${BASH_REMATCH[3]}"
+                local style_str=""
+                
+                if [[ -n "$attr_block" ]]; then
+                    local IFS_old="$IFS"
+                    IFS=','
+                    local attrs=($attr_block)
+                    IFS="$IFS_old"
+                    local attr k v
+                    for attr in "${attrs[@]}"; do
+                        attr="${attr#"${attr%%[![:space:]]*}"}"
+                        attr="${attr%"${attr##*[![:space:]]}"}"
+                        k="${attr%%=*}"
+                        v="${attr#*=}"
+                        [[ "$k" == "align" ]] && k="text-align"
+                        style_str+="${k}: ${v}; "
+                    done
+                    [[ -n "$style_str" ]] && style_str=" style=\"${style_str% }\""
+                fi
+                
+                line="<h0${style_str}>${h_text}</h0>"
+                set_ignore_this_turn=1
+            fi
+        fi
+    }
+
+    __parse_markers() {
+        local marker_re='^([[:space:]]*)([-*+]|[0-9]+\.)[[:space:]]+(.*)$'
+        local num_re='^[0-9]'
+        local space_re='^[[:space:]]+'
+        if [[ "$line" =~ $marker_re ]]; then
+            local indent="${#BASH_REMATCH[1]}" marker="${BASH_REMATCH[2]}" item_content="${BASH_REMATCH[3]}"
+            if [[ "$marker" =~ $num_re ]]; then 
+                __parse_ol "$indent" "$item_content"
+            else 
+                __parse_ul "$indent" "$item_content"
+            fi
+            return 1
+        else
+            if (( list_depth > 0 )); then
+                if [[ -z "${line//[[:space:]]/}" ]]; then
+                    if [[ $ignore_next_empty -eq 1 ]]; then return 0; fi
+                    if [[ $was_empty -eq 0 ]]; then content+="<br><br>"$'\n'; was_empty=1; fi
+                    return 0
+                fi
+                if [[ ! "$line" =~ $space_re ]]; then __parse_list; fi
+            fi
+        fi
+        return 1
+    }
+
+    __parse_section() {
+        if [[ "$line" =~ ^(@+)(\{([^}]+)\})?[[:space:]]*(.*)$ ]]; then
+            (( list_depth > 0 )) && __parse_list
+            local s_level="${#BASH_REMATCH[1]}"
+            local attr_block="${BASH_REMATCH[3]}"
+            local style_str=""
+            
+            if [[ -n "$attr_block" ]]; then
+                local IFS_old="$IFS"
+                IFS=','
+                local attrs=($attr_block)
+                IFS="$IFS_old"
+                local attr k v
+                for attr in "${attrs[@]}"; do
+                    attr="${attr#"${attr%%[![:space:]]*}"}"
+                    attr="${attr%"${attr##*[![:space:]]}"}"
+                    k="${attr%%=*}"
+                    v="${attr#*=}"
+                    
+                    if [[ "$k" == "align" ]]; then
+                        local flex_align="$v"
+                        [[ "$v" == "left" ]] && flex_align="flex-start"
+                        [[ "$v" == "right" ]] && flex_align="flex-end"
+                        style_str+="display: flex; justify-content: center; flex-direction: column; align-items: ${flex_align}; text-align: ${v}; "
+                        continue
+                    fi
+                    
+                    [[ "$k" == "bg" ]] && k="background-color"
+                    style_str+="${k}: ${v}; "
+                done
+                [[ -n "$style_str" ]] && style_str=" style=\"${style_str% }\""
+            fi
+            
+            ((section_count++))
+            local sec_tag=""
+            
+            while (( ${#section_stack[@]} > 0 )); do
+                local last_idx=$((${#section_stack[@]}-1))
+                local last_val="${section_stack[$last_idx]}"
+                if (( last_val >= s_level )); then
+                    sec_tag+="</section>"$'\n'
+                    unset "section_stack[$last_idx]"
+                else
+                    break
+                fi
+            done
+            
+            section_stack+=("$s_level")
+            line="${sec_tag}<section class=\"section-${section_count} section-level-${s_level}\"${style_str}>"
+            set_ignore_this_turn=1
+        fi
+    }
+
+    __parse_listings() {
+        if [[ "$line" != *"{{"* ]]; then return 0; fi
+        local matched=0
+        while [[ "$line" =~ \{\{[[:space:]]*list\.pages([[:space:]]+([^}]+))?[[:space:]]*\}\} ]]; do
+            local full_match="${BASH_REMATCH[0]}"
+            local args="${BASH_REMATCH[2]:-}"
+            local list_html=""
+            if type __listing_pages_r >/dev/null 2>&1; then
+                __listing_pages_r "$args"; list_html="$REPLY"
+            else
+                list_html="$(__listing_pages "$args")"
+            fi
+            line="${line/"$full_match"/$list_html}"
+            matched=1
+        done
+        
+        while [[ "$line" =~ \{\{[[:space:]]*list\.block\.([a-zA-Z0-9_-]+)([[:space:]]+([^}]+))?[[:space:]]*\}\} ]]; do
+            local full_match="${BASH_REMATCH[0]}"
+            local b_type="${BASH_REMATCH[1]}"
+            local args="${BASH_REMATCH[3]:-}"
+            local list_html=""
+            if type __listing_blocks_r >/dev/null 2>&1; then
+                __listing_blocks_r "$b_type" "$args"; list_html="$REPLY"
+            else
+                list_html="$(__listing_blocks "$b_type" "$args")"
+            fi
+            line="${line/"$full_match"/$list_html}"
+            matched=1
+        done
+        
+        while [[ "$line" =~ \{\{[[:space:]]*list\.([a-zA-Z0-9_-]+)(:([^}[:space:]]+))?[[:space:]]*\}\} ]]; do
+            local full_match="${BASH_REMATCH[0]}"
+            local l_type="${BASH_REMATCH[1]}"
+            local l_path="${BASH_REMATCH[3]}"
+            local list_html=""
+            if type __listing_blocks_r >/dev/null 2>&1; then
+                __listing_blocks_r "$l_type" "$l_path"; list_html="$REPLY"
+            else
+                list_html="$(__listing_blocks "$l_type" "$l_path")"
+            fi
+            line="${line/"$full_match"/$list_html}"
+            matched=1
+        done
+        if (( matched == 1 )); then
+            set_ignore_this_turn=1
+        fi
+    }
+
+    __parse_countings() {
+        if [[ "$line" != *"{{count."* && "$line" != *"{{"*"count."* ]]; then return 0; fi
+        while [[ "$line" =~ \{\{[[:space:]]*count\.pages([[:space:]]+([^}{]+))?[[:space:]]*\}\} ]]; do
+            local full_match="${BASH_REMATCH[0]}"
+            local args="${BASH_REMATCH[2]:-}"
+            local count_val="0"
+            if type __counting_pages_r >/dev/null 2>&1; then
+                __counting_pages_r "$args"; count_val="$REPLY"
+            elif type __counting_pages >/dev/null 2>&1; then
+                count_val="$(__counting_pages "$args")"
+            fi
+            local old_line="$line"
+            line="${line/"$full_match"/$count_val}"
+            [[ "$line" == "$old_line" ]] && break
+        done
+        while [[ "$line" =~ \{\{[[:space:]]*count\.block\.([a-zA-Z0-9_-]+)([[:space:]]+([^}{]+))?[[:space:]]*\}\} ]]; do
+            local full_match="${BASH_REMATCH[0]}"
+            local b_type="${BASH_REMATCH[1]}"
+            local args="${BASH_REMATCH[3]:-}"
+            local count_val="0"
+            if type __counting_blocks_r >/dev/null 2>&1; then
+                __counting_blocks_r "$b_type" "$args"; count_val="$REPLY"
+            elif type __counting_blocks >/dev/null 2>&1; then
+                count_val="$(__counting_blocks "$b_type" "$args")"
+            fi
+            local old_line="$line"
+            line="${line/"$full_match"/$count_val}"
+            [[ "$line" == "$old_line" ]] && break
+        done
+        while [[ "$line" =~ \{\{[[:space:]]*count\.([a-zA-Z0-9_-]+)(:([^}{[:space:]]+))?[[:space:]]*\}\} ]]; do
+            local full_match="${BASH_REMATCH[0]}"
+            local c_type="${BASH_REMATCH[1]}"
+            local c_path="${BASH_REMATCH[3]}"
+            [[ "$c_type" == "pages" || "$c_type" == "block" ]] && break
+            local count_val="0"
+            if type __counting_blocks_r >/dev/null 2>&1; then
+                __counting_blocks_r "$c_type" "$c_path"; count_val="$REPLY"
+            elif type __counting_blocks >/dev/null 2>&1; then
+                count_val="$(__counting_blocks "$c_type" "$c_path")"
+            fi
+            local old_line="$line"
+            line="${line/"$full_match"/$count_val}"
+            [[ "$line" == "$old_line" ]] && break
+        done
+    }
+
+    __parse_main() {
+        local section_count=0
+        local -a section_stack=()
+        local -a content_parts=()
+        local p_pre=$'\x25\x25PREBLOCK\x25\x25'
+        for line in "${lines[@]}"; do
+            set_ignore_this_turn=0
+            line="${line%$'\r'}"
+            if [[ "$line" == "$p_pre"* ]]; then
+                if (( list_depth > 0 )); then
+                    content=""
+                    __parse_list
+                    content_parts+=("$content")
+                    content=""
+                fi
+                local cp_len=${#content_parts[@]}
+                if (( cp_len > 0 )) && [[ "${content_parts[cp_len-1]}" == "<br><br>"$'\n' ]]; then
+                    unset "content_parts[$((cp_len-1))]"
+                fi
+                line="${line#"$p_pre"}"
+                if [[ "$line" == *"$"* ]]; then
+                    local -a masked_codes=()
+                    local m_idx=0
+                    __parse_tex
+                    local i
+                    for (( i=0; i<m_idx; i++ )); do
+                        line="${line//%%MASKED_${i}%%/${masked_codes[$i]}}"
+                    done
+                fi
+                content_parts+=("${line//$'\x03'/$'\n'}"$'\n')
+                was_empty=0
+                ignore_next_empty=1
+                continue
+            fi
+            content=""
+            if __parse_code; then
+                [[ -n "$content" ]] && content_parts+=("$content")
+                continue
+            fi
+            if __parse_blocks; then
+                [[ -n "$content" ]] && content_parts+=("$content")
+                continue
+            fi
+            if __parse_html; then
+                [[ -n "$content" ]] && content_parts+=("$content")
+                continue
+            fi
+            
+            __parse_vars
+            __parse_listings
+            __parse_countings
+            __parse_headers
+            __parse_section
+            if __parse_markers; then
+                [[ -n "$content" ]] && content_parts+=("$content")
+                continue
+            fi
+            [[ -n "$content" ]] && content_parts+=("$content")
+            __parse_markdown
+            
+            if [[ -z "${line//[[:space:]]/}" ]]; then
+                if [[ $ignore_next_empty -eq 1 ]]; then :
+                elif [[ $was_empty -eq 0 ]]; then content_parts+=("<br><br>"$'\n'); was_empty=1; fi
+            else
+                content_parts+=("${line}"$'\n'); was_empty=0
+                if [[ $set_ignore_this_turn -eq 1 ]]; then ignore_next_empty=1; else ignore_next_empty=0; fi
+            fi
+        done
+        content=""
+        __parse_list
+        [[ -n "$content" ]] && content_parts+=("$content")
+        while (( ${#section_stack[@]} > 0 )); do
+            content_parts+=("</section>"$'\n')
+            unset "section_stack[$((${#section_stack[@]}-1))]"
+        done
+        local old_ifs="$IFS"
+        IFS=""
+        content="${content_parts[*]}"
+        IFS="$old_ifs"
+    }
+    
+    
+}

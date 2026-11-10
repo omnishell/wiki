@@ -1,0 +1,839 @@
+#! /bin/bash
+
+__render__() {
+    
+    __render_template() {
+    local -a layout_out=()
+    local skip=0 ll
+    for ll in "${layout_lines[@]}"; do
+        if [[ "$ll" == *"{%"* ]]; then
+            if [[ "$ll" =~ \{%\ *if\ *\'([^\']+)\'\ *in\ *page\.name\ *and\ *not\ *page\.name\ *==\ *\"([^\"]+)\"\ *%\} ]]; then
+                if [[ "$pagename" == *"${BASH_REMATCH[1]}"* && "$pagename" != "${BASH_REMATCH[2]}" ]]; then skip=0; else skip=1; fi
+                continue
+            fi
+            if [[ "$ll" =~ \{%\ *if\ *\'([^\']+)\'\ *in\ *page\.name\ *%\} ]]; then
+                if [[ "$pagename" == *"${BASH_REMATCH[1]}"* ]]; then skip=0; else skip=1; fi
+                continue
+            fi
+            if [[ "$ll" =~ \{%\ *else\ *%\} ]]; then
+                if [[ $skip -eq 0 ]]; then skip=1; else skip=0; fi
+                continue
+            fi
+            if [[ "$ll" =~ \{%\ *endif\ *%\} ]]; then
+                skip=0
+                continue
+            fi
+            if [[ "$ll" =~ \{%\ *(for|from|include|endfor).*%\} ]]; then continue; fi
+        fi
+        if (( skip == 1 )); then continue; fi
+        if [[ "$ll" == *"{{ render_menu_item"* || "$ll" == *"{{ item"* ]]; then continue; fi
+        if [[ "$ll" == *"{{ page."* ]]; then
+            while [[ "$ll" =~ \{\{\ *page\.([a-zA-Z0-9_.-]+)\ *\}\} ]]; do
+                local full_match="${BASH_REMATCH[0]}"
+                local suffix="${BASH_REMATCH[1]}"
+                if [[ "$suffix" == "name" || "$suffix" == "body" || "$suffix" == "title" ]]; then
+                    ll="${ll/"$full_match"/%%RETAIN_PAGE_${suffix}%%}"
+                else
+                    local var_name="page.${suffix}"
+                    local val="${PAGE_VARS[$var_name]}"
+                    ll="${ll//"$full_match"/$val}"
+                fi
+            done
+            local pnt="{{ page.name }}"
+            local pbt="{{ page.body }}"
+            local ptt="{{ page.title }}"
+            ll="${ll//%%RETAIN_PAGE_name%%/$pnt}"
+            ll="${ll//%%RETAIN_PAGE_body%%/$pbt}"
+            ll="${ll//%%RETAIN_PAGE_title%%/$ptt}"
+        fi
+        if [[ "$ll" == *"{{ wiki.frontmatter."* ]]; then
+            while [[ "$ll" =~ \{\{\ *wiki\.frontmatter\.([a-zA-Z0-9_.-]+)\ *\}\} ]]; do
+                local full_match="${BASH_REMATCH[0]}"
+                local var_name="page.${BASH_REMATCH[1]}"
+                local val="${PAGE_VARS[$var_name]}"
+                ll="${ll//"$full_match"/$val}"
+            done
+        fi
+        layout_out+=("$ll")
+    done
+    local old_ifs="$IFS"
+    IFS=$'\n'
+    local PAGE_LAYOUT="${layout_out[*]}"$'\n'
+    IFS="$old_ifs"
+
+    local p_breadcrumb=1 p_featured=1 p_menu=1
+    local p_str="${PAGE_VARS["page.partials"]:-}"
+    if [[ -n "$p_str" ]]; then
+        while [[ "$p_str" =~ ([a-zA-Z0-9_-]+)=([a-zA-Z0-9_-]+) ]]; do
+            local k="${BASH_REMATCH[1]}" v="${BASH_REMATCH[2]}"
+            if [[ "$v" == "false" || "$v" == "0" ]]; then
+                [[ "$k" == "breadcrumb" ]] && p_breadcrumb=0
+                [[ "$k" == "featured" ]] && p_featured=0
+                [[ "$k" == "menu" ]] && p_menu=0
+            elif [[ "$v" == "true" || "$v" == "1" ]]; then
+                [[ "$k" == "breadcrumb" ]] && p_breadcrumb=1
+                [[ "$k" == "featured" ]] && p_featured=1
+                [[ "$k" == "menu" ]] && p_menu=1
+            fi
+            p_str="${p_str#*${BASH_REMATCH[0]}}"
+        done
+    fi
+
+    rendered="$PAGE_LAYOUT"
+    if [[ "$rendered" == *"{{"* ]]; then
+        while [[ "$rendered" =~ \{\{[[:space:]]*(wiki\.)?menu[[:space:]]+([^}]+)\}\} ]]; do
+            local full_match="${BASH_REMATCH[0]}"
+            local args="${BASH_REMATCH[2]}"
+            local custom_menu=""
+            if (( p_menu == 1 )); then
+                __partial_menu_r "$args"
+                custom_menu="$REPLY"
+            fi
+            rendered="${rendered/"$full_match"/$custom_menu}"
+        done
+        while [[ "$rendered" =~ \{\{[[:space:]]*(wiki\.)?breadcrumb[[:space:]]*([^}]*)\}\} ]]; do
+            local full_match="${BASH_REMATCH[0]}"
+            local args="${BASH_REMATCH[2]}"
+            local custom_bc=""
+            if (( p_breadcrumb == 1 )); then
+                __partial_breadcrumb_r "$args"
+                custom_bc="$REPLY"
+            fi
+            rendered="${rendered/"$full_match"/$custom_bc}"
+        done
+        while [[ "$rendered" =~ \{\{[[:space:]]*(wiki\.)?related([[:space:]]+([^}]+))?[[:space:]]*\}\} ]]; do
+            local full_match="${BASH_REMATCH[0]}"
+            local args="${BASH_REMATCH[3]:-}"
+            __partial_related_r "$args"
+            local custom_related="$REPLY"
+            rendered="${rendered/"$full_match"/$custom_related}"
+        done
+        while [[ "$rendered" =~ \{\{[[:space:]]*(wiki\.)?head[[:space:]]+([^}]+)\}\} ]]; do
+            local full_match="${BASH_REMATCH[0]}"
+            local args="${BASH_REMATCH[2]}"
+            __partial_head_r "$args"
+            local custom_head="$REPLY"
+            rendered="${rendered/"$full_match"/$custom_head}"
+        done
+        while [[ "$rendered" =~ \{\{[[:space:]]*(wiki\.)?author[[:space:]]+([^}]+)\}\} ]]; do
+            local full_match="${BASH_REMATCH[0]}"
+            local args="${BASH_REMATCH[2]}"
+            __partial_author "$args"
+            rendered="${rendered/"$full_match"/$WIKI_AUTHOR_HTML}"
+        done
+        while [[ "$rendered" =~ \{\{[[:space:]]*(wiki\.)?search[[:space:]]+([^}]+)\}\} ]]; do
+            local full_match="${BASH_REMATCH[0]}"
+            local args="${BASH_REMATCH[2]}"
+            __partial_search "$args"
+            rendered="${rendered/"$full_match"/$WIKI_SEARCH_HTML}"
+        done
+        while [[ "$rendered" =~ \{\{[[:space:]]*(wiki\.)?settings[[:space:]]+([^}]+)\}\} ]]; do
+            local full_match="${BASH_REMATCH[0]}"
+            local args="${BASH_REMATCH[2]}"
+            __partial_settings "$args"
+            rendered="${rendered/"$full_match"/$WIKI_SETTINGS_HTML}"
+        done
+        while [[ "$rendered" =~ \{\{[[:space:]]*(wiki\.)?help[[:space:]]+([^}]+)\}\} ]]; do
+            local full_match="${BASH_REMATCH[0]}"
+            local args="${BASH_REMATCH[2]}"
+            __partial_help "$args"
+            rendered="${rendered/"$full_match"/$WIKI_HELP_HTML}"
+        done
+    fi
+
+    local year="${_BUILD_YEAR:-}" now="${_BUILD_NOW:-}" t_val=""
+    [[ -z "$year" ]] && printf -v year "%(%Y)T" -1
+    [[ -z "$now" ]] && printf -v now "%(%Y/%m/%d at %H:%M)T" -1
+    local WIKI_SEARCH_HTML="" WIKI_THUMB_HTML="" WIKI_TAGS_HTML="" WIKI_AUTHOR_HTML="" WIKI_SETTINGS_HTML="" WIKI_HELP_HTML=""
+
+    [[ "$rendered" == *"{{ wiki.search }}"* ]] && __partial_search
+    [[ "$rendered" == *"{{ wiki.thumb }}"* ]] && __partial_thumb
+    [[ "$rendered" == *"{{ wiki.tags }}"* ]] && __partial_tags
+    [[ "$rendered" == *"{{ wiki.author }}"* ]] && __partial_author
+    [[ "$rendered" == *"{{ wiki.settings }}"* ]] && __partial_settings
+    [[ "$rendered" == *"{{ wiki.help }}"* ]] && __partial_help
+
+    local search_tags=("{{ page.body }}" "{{ page.name }}" "{{ page.title }}" "{{ wiki.menu }}" "{{ wiki.featured }}" "{{ datetime.year }}" "{{ datetime.now }}" "{{ wiki.search }}" "{{ wiki.thumb }}" "{{ wiki.tags }}" "{{ wiki.author }}" "{{ wiki.settings }}" "{{ wiki.help }}")
+    for search in "${search_tags[@]}"; do
+        [[ "$rendered" != *"$search"* ]] && continue
+        case "$search" in
+            "{{ page.body }}") t_val="$content" ;;
+            "{{ page.name }}") t_val="$title" ;;
+            "{{ page.title }}") t_val="${PAGE_TITLES[$pagename]:-$pagename}" ;;
+            "{{ wiki.menu }}")
+                if (( p_menu == 1 )); then t_val="$WIKI_MENU_HTML"; else t_val=""; fi ;;
+            "{{ wiki.featured }}")
+                if (( p_featured == 1 )); then t_val="$WIKI_FEATURED_HTML"; else t_val=""; fi ;;
+            "{{ datetime.year }}") t_val="$year" ;;
+            "{{ datetime.now }}") t_val="$now" ;;
+            "{{ wiki.search }}") t_val="$WIKI_SEARCH_HTML" ;;
+            "{{ wiki.thumb }}") t_val="$WIKI_THUMB_HTML" ;;
+            "{{ wiki.tags }}") t_val="$WIKI_TAGS_HTML" ;;
+            "{{ wiki.author }}") t_val="$WIKI_AUTHOR_HTML" ;;
+            "{{ wiki.settings }}") t_val="$WIKI_SETTINGS_HTML" ;;
+            "{{ wiki.help }}") t_val="$WIKI_HELP_HTML" ;;
+        esac
+        rendered="${rendered//"$search"/$t_val}"
+    done
+
+    local auto_js="<script>%%WIKI_SEARCH_CONFIG%%; if (typeof hljs !== 'undefined') hljs.highlightAll();</script>"
+    if [[ "$rendered" == *"</body>"* ]]; then
+        rendered="${rendered/<\/body>/$auto_js$'\n'<\/body>}"
+    else
+        rendered+="$auto_js"$'\n'
+    fi
+}
+
+    __render_main() {
+        local file="$1" pagename="$2" out_path="$3" current_dir="$4"
+        local h_regex='^(#{1,6})\ +(.*)'
+        local _amp="&amp;" _lt="&lt;" _gt="&gt;"
+        if shopt -q patsub_replacement 2>/dev/null; then _amp="\\&amp;"; _lt="\\&lt;"; _gt="\\&gt;"; fi
+        local content="" rendered="" in_frontmatter=0 title="$pagename" TOC_HTML="<ul class=\"toc\">"$'\n'
+        local page_table_count=0 page_diagram_count=0
+        local in_code_block=0 in_html_pre=0 in_custom_block="" custom_block_indent="" custom_block_depth=0 list_depth=0 was_empty=0 ignore_next_empty=0 set_ignore_this_turn=0 line
+        local -a table_buffer=() diagram_buffer=() custom_block_buffer=() hide_buffer=() KEYS_STACK=() LIST_INDENTS=() LIST_TYPES=() lines=()
+        local -A PAGE_VARS=()
+        local raw_file=""
+        IFS= read -r -d '' raw_file < "$file"
+        true
+        if [[ "$raw_file" == *"block.def"* ]]; then
+            local tmp_js="$cache_dir/${pagename}_def_js.tmp"
+            local tmp_li="$cache_dir/${pagename}_def_li.tmp"
+            local tmp_rf="$cache_dir/${pagename}_def_rf.tmp"
+            local ltx_cache="$cache_dir/latex.cache"
+            local refs_tsv="$cache_dir/refs.tsv"
+            local awk_out=""
+            awk_out="$(LC_ALL=C awk -v pagename="$pagename" -v page_url_base="/${pagename//./\/}.html" -v w_name="$w_name" -v w_env="${ENV:-}" -v f_js="$tmp_js" -v f_li="$tmp_li" -v f_rf="$tmp_rf" -v f_ltx="$ltx_cache" -v f_refs="$refs_tsv" '
+                function slugify(s) {
+                    s = tolower(s)
+                    gsub(/ /, "-", s)
+                    gsub(/\xc3[\xa0-\xa4\x80-\x84]/, "a", s)
+                    gsub(/\xc3[\xa8-\xab\x88-\x8b]/, "e", s)
+                    gsub(/\xc3[\xac-\xaf\x8c-\x8f]/, "i", s)
+                    gsub(/\xc3[\xb2-\xb6\x92-\x96]/, "o", s)
+                    gsub(/\xc3[\xb9-\xbc\x99-\x9c]/, "u", s)
+                    gsub(/\xc3[\xa7\x87]/, "c", s)
+                    gsub(/\xc3[\xb1\x91]/, "n", s)
+                    gsub(/[^a-z0-9_./-]/, "", s)
+                    if (s ~ /^-[neE]+$/) s = ""
+                    return s
+                }
+                function json_esc(s) {
+                    gsub(/\\/, "\\\\", s)
+                    gsub(/"/, "\\\"", s)
+                    gsub(/\r/, "", s)
+                    gsub(/\n/, "\\n", s)
+                    gsub(/\t/, "\\t", s)
+                    return s
+                }
+                function resolve_ref_html(topic, ref_key, label,    key, target, href, c_i, ipath, marker) {
+                    key = topic "::" ref_key
+                    target = ""
+                    if (key in w_refs) target = w_refs[key]
+                    else if (w_name != "" && ((w_name "::" w_env "::" key) in w_refs)) target = w_refs[w_name "::" w_env "::" key]
+                    if (target == "") return "<span class=\"wiki-ref-err\">" label "</span>"
+                    if (target ~ /^https?:\/\//) {
+                        href = target
+                    } else {
+                        c_i = index(target, ":")
+                        if (c_i > 0) {
+                            ipath = substr(target, 1, c_i - 1)
+                            marker = substr(target, c_i + 1)
+                        } else {
+                            ipath = target
+                            marker = ""
+                        }
+                        gsub(/\./, "/", ipath)
+                        href = "/" ipath ".html"
+                        if (marker != "") href = href "#" marker
+                    }
+                    return "<a class=\"wiki-topic-" topic "\" href=\"" href "\">" label "</a>"
+                }
+                function parse_refs_str(s,    out, idx1, idx2, pre, inner, c_in, c_idx, topic, rest, raw_ref, label, ref_key, p_url) {
+                    out = ""
+                    while ((idx1 = index(s, "{{")) > 0) {
+                        pre = substr(s, 1, idx1 - 1)
+                        s = substr(s, idx1 + 2)
+                        idx2 = index(s, "}}")
+                        if (idx2 == 0) { out = out "{{" s; s = ""; break }
+                        inner = substr(s, 1, idx2 - 1)
+                        s = substr(s, idx2 + 2)
+                        c_in = inner
+                        sub(/^[ \t]+/, "", c_in); sub(/[ \t]+$/, "", c_in)
+                        c_idx = index(c_in, ":")
+                        if (c_idx > 1) {
+                            topic = substr(c_in, 1, c_idx - 1)
+                            if (topic ~ /^[a-zA-Z0-9_-]+$/) {
+                                rest = substr(c_in, c_idx + 1)
+                                c_idx = index(rest, ":")
+                                if (c_idx > 0) {
+                                    raw_ref = substr(rest, 1, c_idx - 1)
+                                    label = substr(rest, c_idx + 1)
+                                } else {
+                                    raw_ref = rest
+                                    label = ""
+                                }
+                                sub(/^[ \t]+/, "", raw_ref); sub(/[ \t]+$/, "", raw_ref)
+                                sub(/^[ \t]+/, "", label); sub(/[ \t]+$/, "", label)
+                                if (label == "") label = raw_ref
+                                if (topic == "page") {
+                                    p_url = raw_ref
+                                    gsub(/\./, "/", p_url)
+                                    out = out pre "<a href=\"/" p_url ".html\">" label "</a>"
+                                } else {
+                                    ref_key = slugify(raw_ref)
+                                    out = out pre resolve_ref_html(topic, ref_key, label)
+                                }
+                                continue
+                            }
+                        }
+                        out = out pre "{{" inner "}}"
+                    }
+                    return out s
+                }
+                function replace_mask(str, tok, val,    idx) {
+                    while ((idx = index(str, tok)) > 0) {
+                        str = substr(str, 1, idx - 1) val substr(str, idx + length(tok))
+                    }
+                    return str
+                }
+                function parse_inline_md(l,    bt, m_i, m_codes, idx1, idx2, pre, rest, inner, suf, i, l_text, l_href, full, lkey) {
+                    bt = sprintf("%c", 96)
+                    gsub("\\\\" bt, "\x1f", l)
+                    m_i = 0
+                    while ((idx1 = index(l, bt)) > 0) {
+                        pre = substr(l, 1, idx1 - 1)
+                        rest = substr(l, idx1 + 1)
+                        idx2 = index(rest, bt)
+                        if (idx2 == 0) break
+                        inner = substr(rest, 1, idx2 - 1)
+                        suf = substr(rest, idx2 + 1)
+                        gsub(/&/, "\\&amp;", inner)
+                        gsub(/</, "\\&lt;", inner)
+                        gsub(/>/, "\\&gt;", inner)
+                        m_codes[m_i] = "<inline>" inner "</inline>"
+                        l = pre "%%MASK" m_i "%%" suf
+                        m_i++
+                    }
+                    gsub(/\x1f/, bt, l)
+                    while ((idx1 = index(l, "$")) > 0) {
+                        pre = substr(l, 1, idx1 - 1)
+                        rest = substr(l, idx1 + 1)
+                        idx2 = index(rest, "$")
+                        if (idx2 == 0) break
+                        inner = substr(rest, 1, idx2 - 1)
+                        suf = substr(rest, idx2 + 1)
+                        lkey = "inline:" inner
+                        if (lkey in ltx_map) {
+                            m_codes[m_i] = ltx_map[lkey]
+                        } else {
+                            m_codes[m_i] = "$" inner "$"
+                        }
+                        l = pre "%%MASK" m_i "%%" suf
+                        m_i++
+                    }
+                    while ((idx1 = index(l, "**")) > 0) {
+                        pre = substr(l, 1, idx1 - 1)
+                        rest = substr(l, idx1 + 2)
+                        idx2 = index(rest, "**")
+                        if (idx2 == 0) break
+                        l = pre "<strong>" substr(rest, 1, idx2 - 1) "</strong>" substr(rest, idx2 + 2)
+                    }
+                    while ((idx1 = index(l, "_")) > 0) {
+                        pre = substr(l, 1, idx1 - 1)
+                        rest = substr(l, idx1 + 1)
+                        idx2 = index(rest, "_")
+                        if (idx2 == 0) break
+                        l = pre "<em>" substr(rest, 1, idx2 - 1) "</em>" substr(rest, idx2 + 1)
+                    }
+                    while ((idx1 = index(l, "++")) > 0) {
+                        pre = substr(l, 1, idx1 - 1)
+                        rest = substr(l, idx1 + 2)
+                        idx2 = index(rest, "++")
+                        if (idx2 == 0) break
+                        l = pre "<ins>" substr(rest, 1, idx2 - 1) "</ins>" substr(rest, idx2 + 2)
+                    }
+                    while (match(l, /\[[^\]]+\]\([^)]+\)/)) {
+                        full = substr(l, RSTART, RLENGTH)
+                        pre = substr(l, 1, RSTART - 1)
+                        suf = substr(l, RSTART + RLENGTH)
+                        idx1 = index(full, "](")
+                        l_text = substr(full, 2, idx1 - 2)
+                        l_href = substr(full, idx1 + 2, length(full) - idx1 - 2)
+                        if (l_href !~ /^https?:\/\//) {
+                            sub(/\.[mM][dD]/, ".html", l_href)
+                            sub(/\.[mM][aA][rR][kK][dD][oO][wW][nN]/, ".html", l_href)
+                        }
+                        l = pre "<a href=\"" l_href "\">" l_text "</a>" suf
+                    }
+                    if (index(l, "{{") > 0) l = parse_refs_str(l)
+                    for (i = 0; i < m_i; i++) {
+                        l = replace_mask(l, "%%MASK" i "%%", m_codes[i])
+                    }
+                    return l
+                }
+                function parse_field(fv,    n, flines, base_ind, i, l, trimmed, ind, out, btt, l_depth, l_ind, l_typ, is_li, ltype) {
+                    btt = sprintf("%c%c%c", 96, 96, 96)
+                    gsub(/\t/, "    ", fv)
+                    gsub(/\xc2\xa0/, " ", fv)
+                    sub(/^[ \n\r]+/, "", fv)
+                    sub(/[ \n\r]+$/, "", fv)
+                    if (fv == "") return ""
+                    if (index(fv, "\n") == 0 && fv !~ /^::/ && index(fv, btt) == 0 && fv !~ /^[-*+] / && fv !~ /^[0-9]+\. /) {
+                        return parse_inline_md(fv)
+                    }
+                    n = split(fv, flines, "\n")
+                    base_ind = -1
+                    for (i = 1; i <= n; i++) {
+                        sub(/\r$/, "", flines[i])
+                        l = flines[i]
+                        trimmed = l
+                        sub(/^[ \t]+/, "", trimmed)
+                        if (trimmed != "") {
+                            ind = length(l) - length(trimmed)
+                            if (base_ind == -1) base_ind = ind
+                            else if (ind < base_ind) base_ind = ind
+                        }
+                    }
+                    out = ""
+                    l_depth = 0
+                    for (i = 1; i <= n; i++) {
+                        l = flines[i]
+                        trimmed = l
+                        sub(/^[ \t]+/, "", trimmed)
+                        if (base_ind > 0 && trimmed != "") l = substr(l, base_ind + 1)
+                        sub(/^[ \t]*::[ \t]?/, "", l)
+                        trimmed = l
+                        sub(/^[ \t]+/, "", trimmed)
+                        is_li = 0
+                        if (trimmed ~ /^[-*+][ \t]+/) {
+                            is_li = 1
+                            ind = length(l) - length(trimmed)
+                            ltype = "ul"
+                            sub(/^[-*+][ \t]+/, "", trimmed)
+                            l = trimmed
+                        } else if (trimmed ~ /^[0-9]+\.[ \t]+/) {
+                            is_li = 1
+                            ind = length(l) - length(trimmed)
+                            ltype = "ol"
+                            sub(/^[0-9]+\.[ \t]+/, "", trimmed)
+                            l = trimmed
+                        } else if (l_depth > 0) {
+                            if (trimmed == "") continue
+                            if (length(l) == length(trimmed)) {
+                                while (l_depth > 0) {
+                                    l_depth--
+                                    out = out "</li></" l_typ[l_depth] ">"
+                                }
+                            }
+                        }
+                        l = parse_inline_md(l)
+                        if (is_li) {
+                            if (l_depth == 0) {
+                                l_ind[l_depth] = ind; l_typ[l_depth] = ltype; l_depth++
+                                out = out "<" ltype "><li>" l
+                            } else if (ind > l_ind[l_depth - 1]) {
+                                l_ind[l_depth] = ind; l_typ[l_depth] = ltype; l_depth++
+                                out = out "<" ltype "><li>" l
+                            } else {
+                                while (l_depth > 0 && ind < l_ind[l_depth - 1]) {
+                                    l_depth--
+                                    out = out "</li></" l_typ[l_depth] ">"
+                                }
+                                if (l_depth == 0) {
+                                    l_ind[l_depth] = ind; l_typ[l_depth] = ltype; l_depth++
+                                    out = out "<" ltype "><li>" l
+                                } else if (l_typ[l_depth - 1] != ltype) {
+                                    out = out "</li></" l_typ[l_depth - 1] "><" ltype "><li>" l
+                                    l_typ[l_depth - 1] = ltype
+                                } else {
+                                    out = out "</li><li>" l
+                                }
+                            }
+                        } else {
+                            out = (out == "" ? l : out "\n" l)
+                        }
+                    }
+                    while (l_depth > 0) {
+                        l_depth--
+                        out = out "</li></" l_typ[l_depth] ">"
+                    }
+                    return out
+                }
+                BEGIN {
+                    in_def = 0; def_indent = ""; buf_len = 0; inner_depth = 0
+                    ctx_key = "__context" "__"
+                    id_key = "__id" "__"
+                    entry_key = "__entry" "__"
+                    refs_key = "__refs" "__"
+                    btt_str = sprintf("%c%c%c", 96, 96, 96)
+                    js_all = ""; li_all = ""; rf_all = ""; tkey_first = ""; acc_preblock = ""
+                    if (f_ltx != "") {
+                        while ((getline lline < f_ltx) > 0) {
+                            t_i = index(lline, "\t")
+                            if (t_i > 0) {
+                                lk = substr(lline, 1, t_i - 1)
+                                lv = substr(lline, t_i + 1)
+                                gsub(/\x01/, "\x03", lv)
+                                ltx_map[lk] = lv
+                            }
+                        }
+                        close(f_ltx)
+                    }
+                    if (f_refs != "") {
+                        while ((getline rline < f_refs) > 0) {
+                            t_i = index(rline, "\t")
+                            if (t_i > 0) {
+                                rk = substr(rline, 1, t_i - 1)
+                                rv = substr(rline, t_i + 1)
+                                w_refs[rk] = rv
+                            }
+                        }
+                        close(f_refs)
+                    }
+                }
+                {
+                    raw_line = $0
+                    sub(/\r$/, "", raw_line)
+                    if (!in_def) {
+                        if (raw_line ~ /^[ \t]*\{\{[ \t]*block\.def[ \t]*\}\}[ \t]*$/) {
+                            in_def = 1
+                            def_indent = raw_line
+                            sub(/\{\{.*$/, "", def_indent)
+                            buf_len = 0
+                            bail = 0
+                            inner_depth = 0
+                            next
+                        }
+                        if (acc_preblock != "") {
+                            if (raw_line ~ /^[ \t]*$/) next
+                            print "%%PREBLOCK%%" acc_preblock
+                            acc_preblock = ""
+                        }
+                        print raw_line
+                    } else {
+                        l_trim = raw_line
+                        sub(/^[ \t]+/, "", l_trim)
+                        curr_ind = substr(raw_line, 1, length(raw_line) - length(l_trim))
+                        check_trim = l_trim
+                        if (check_trim ~ /^::[ \t]*\{\{/) {
+                            sub(/^::[ \t]*/, "", check_trim)
+                        }
+                        if (check_trim ~ /^\{\{[ \t]*block\.end[ \t]*\}\}[ \t]*$/) {
+                            if (inner_depth > 0) {
+                                inner_depth--
+                                buf[++buf_len] = raw_line
+                                next
+                            }
+                        } else if (check_trim ~ /^\{\{[ \t]*block\.[a-zA-Z0-9_-]+.*\}\}[ \t]*$/) {
+                            inner_depth++
+                            bail = 1
+                            buf[++buf_len] = raw_line
+                            next
+                        }
+                        if (curr_ind == def_indent && l_trim ~ /^\{\{[ \t]*block\.end[ \t]*\}\}[ \t]*$/) {
+                            if (bail) {
+                                if (acc_preblock != "") {
+                                    print "%%PREBLOCK%%" acc_preblock
+                                    acc_preblock = ""
+                                }
+                                print def_indent "{{block.def}}"
+                                for (i = 1; i <= buf_len; i++) print buf[i]
+                                print raw_line
+                                in_def = 0
+                                next
+                            }
+                            k_count = 0
+                            delete b_vals; delete b_keys; delete d_keys; delete d_vals
+                            cur_k = ""; cur_v = ""
+                            for (i = 1; i <= buf_len; i++) {
+                                bl = buf[i]
+                                if (bl ~ /^[ \t]*::[ \t]*[a-zA-Z0-9_-]+:/) {
+                                    if (cur_k != "") { b_vals[cur_k] = cur_v; b_keys[++k_count] = cur_k }
+                                    s = bl
+                                    sub(/^[ \t]*::[ \t]*/, "", s)
+                                    idx = index(s, ":")
+                                    cur_k = substr(s, 1, idx - 1)
+                                    cur_v = substr(s, idx + 1)
+                                    sub(/^[ \t]+/, "", cur_v); sub(/[ \t]+$/, "", cur_v)
+                                } else if (cur_k != "") {
+                                    cur_v = cur_v "\n" bl
+                                }
+                            }
+                            if (cur_k != "") { b_vals[cur_k] = cur_v; b_keys[++k_count] = cur_k }
+                            for (i = 1; i <= k_count; i++) {
+                                k = b_keys[i]; d_keys[k] = k; d_vals[k] = b_vals[k]
+                            }
+                            if ("term" in d_keys && d_keys["term"] != "") {
+                                d_keys["term"] = "def"
+                                d_vals["term"] = "<u>" b_vals["term"] "</u>"
+                            }
+                            if ("context" in b_vals && b_vals["context"] != "") {
+                                b_vals[ctx_key] = b_vals["context"]
+                                d_keys["context"] = ""
+                            }
+                            if (b_vals["related"] == "" && b_vals[refs_key] == "") {
+                                scan = b_vals["idea"] " " b_vals["details"]
+                                ext_refs = ""
+                                delete seen_r
+                                while ((idx1 = index(scan, "{{")) > 0) {
+                                    scan = substr(scan, idx1 + 2)
+                                    idx2 = index(scan, "}}")
+                                    if (idx2 == 0) break
+                                    in_r = substr(scan, 1, idx2 - 1)
+                                    scan = substr(scan, idx2 + 2)
+                                    sub(/^[ \t]+/, "", in_r); sub(/[ \t]+$/, "", in_r)
+                                    c_i = index(in_r, ":")
+                                    if (c_i > 1) {
+                                        t_top = substr(in_r, 1, c_i - 1)
+                                        if (t_top ~ /^[a-zA-Z0-9_-]+$/ && t_top != "page") {
+                                            t_rest = substr(in_r, c_i + 1)
+                                            c_i2 = index(t_rest, ":")
+                                            t_ref = (c_i2 > 0) ? substr(t_rest, 1, c_i2 - 1) : t_rest
+                                            sub(/^[ \t]+/, "", t_ref); sub(/[ \t]+$/, "", t_ref)
+                                            f_ref = t_top "." t_ref
+                                            if (t_ref != "" && !(f_ref in seen_r)) {
+                                                seen_r[f_ref] = 1
+                                                ext_refs = (ext_refs == "" ? f_ref : ext_refs ", " f_ref)
+                                            }
+                                        }
+                                    }
+                                }
+                                if (ext_refs != "") {
+                                    b_vals["related"] = ext_refs
+                                    if (!("related" in d_keys)) b_keys[++k_count] = "related"
+                                    d_keys["related"] = "related"
+                                    d_vals["related"] = ext_refs
+                                }
+                            }
+                            if (b_vals["related"] != "") {
+                                new_rel = ""
+                                rn = split(b_vals["related"], r_arr, ",")
+                                for (ri = 1; ri <= rn; ri++) {
+                                    rit = r_arr[ri]
+                                    sub(/^[ \t]+/, "", rit); sub(/[ \t]+$/, "", rit)
+                                    if (rit != "") {
+                                        if (rit !~ /\..*\./ && rit !~ /^def\./) rit = "def." rit
+                                        new_rel = (new_rel == "" ? rit : new_rel ", " rit)
+                                    }
+                                }
+                                d_vals["related"] = new_rel
+                                d_keys["related"] = refs_key
+                            }
+                            first_k = ""; first_v = ""
+                            if (b_vals["term"] != "") { first_k = "term"; first_v = b_vals["term"] }
+                            else if (b_vals["type"] != "") { first_k = "type"; first_v = b_vals["type"] }
+                            else {
+                                for (i = 1; i <= k_count; i++) {
+                                    k = b_keys[i]
+                                    if (k != id_key && k != ctx_key && k != "context" && k != entry_key && k != refs_key) {
+                                        first_k = k; first_v = b_vals[k]; break
+                                    }
+                                }
+                            }
+                            raw_id = b_vals[id_key]
+                            if (raw_id == "") raw_id = (b_vals[entry_key] != "" ? b_vals[entry_key] : first_v)
+                            if (raw_id == "" && k_count > 0) raw_id = b_vals[b_keys[1]]
+                            clean_id = slugify(raw_id)
+                            ref_key = clean_id
+                            if (b_vals[ctx_key] != "" && index(raw_id, ".") == 0) {
+                                ref_key = slugify(b_vals[ctx_key] "." raw_id)
+                            }
+                            anchor_slug = ref_key
+                            gsub(/[\/.]/, "-", anchor_slug)
+                            anchor_id = "block-def-" anchor_slug
+                            w_refs["def::" ref_key] = pagename ":" anchor_id
+                            if (w_name != "") w_refs[w_name "::" w_env "::def::" ref_key] = pagename ":" anchor_id
+                            b_title = (b_vals[entry_key] != "" ? b_vals[entry_key] : (first_v != "" ? first_v : raw_id))
+                            if (b_vals[ctx_key] != "") {
+                                for (i = 1; i <= k_count; i++) {
+                                    k = b_keys[i]
+                                    if (d_keys[k] != "" && k != id_key && k != ctx_key && k != entry_key && k != refs_key) {
+                                        d_vals[k] = d_vals[k] " <span class=\"def-context\">(" b_vals[ctx_key] ")</span>"
+                                        break
+                                    }
+                                }
+                            }
+                            html = "<block id=\"" anchor_id "\" class=\"block-def\">\x03    <fields id=\"fields-def-" anchor_slug "\" class=\"fields-def\">\x03"
+                            json_s = "{\"url\":\"" json_esc(page_url_base "#" anchor_id) "\""
+                            if (b_vals[ctx_key] != "") {
+                                json_s = json_s ",\"" ctx_key "\":\"" json_esc(b_vals[ctx_key]) "\""
+                            }
+                            for (i = 1; i <= k_count; i++) {
+                                k = b_keys[i]
+                                if (k == id_key) continue
+                                if (k == ctx_key) continue
+                                if (k == entry_key) continue
+                                v = b_vals[k]
+                                json_s = json_s ",\"" k "\":\"" json_esc(v) "\""
+                                dk = d_keys[k]
+                                if (dk == "") continue
+                                dv = d_vals[k]
+                                is_ref_f = 0
+                                if (k == refs_key) is_ref_f = 1
+                                if (dk == refs_key) is_ref_f = 1
+                                if (is_ref_f) {
+                                    p_name = (k != refs_key ? k : "refs")
+                                    rel_out = "<ul>\x03"
+                                    rn = split(dv, r_arr, ",")
+                                    for (ri = 1; ri <= rn; ri++) {
+                                        rit = r_arr[ri]
+                                        sub(/^[ \t]+/, "", rit); sub(/[ \t]+$/, "", rit)
+                                        if (rit != "") {
+                                            dot_i = index(rit, ".")
+                                            r_top = substr(rit, 1, dot_i - 1)
+                                            r_ref = substr(rit, dot_i + 1)
+                                            s_ref = slugify(r_ref)
+                                            if (r_top == "page") {
+                                                p_u = s_ref; gsub(/\./, "/", p_u)
+                                                rel_out = rel_out "        <li><a href=\"/" p_u ".html\">" r_ref "</a></li>\x03"
+                                            } else {
+                                                rel_out = rel_out "        <li>" resolve_ref_html(r_top, s_ref, r_ref) "</li>\x03"
+                                            }
+                                        }
+                                    }
+                                    rel_out = rel_out "    </ul>"
+                                    dv = rel_out
+                                    dk = p_name
+                                } else if (b_vals[k] == dv) {
+                                    dv = parse_field(dv)
+                                    gsub(/\n/, "\x03", dv)
+                                }
+                                html = html "        <field id=\"field-def-" dk "-" anchor_slug "\" class=\"field-def-" dk "\">\x03"
+                                html = html "            <prefix id=\"prefix-def-" dk "-" anchor_slug "\" class=\"prefix-def-" dk "\">" dk ": </prefix><div id=\"text-def-" dk "-" anchor_slug "\" class=\"text-prefix-def-" dk "\">" dv "</div>\x03"
+                                html = html "        </field>\x03"
+                            }
+                            html = html "    </fields>\x03</block>"
+                            json_s = json_s "},\n"
+                            if (tkey_first == "") tkey_first = (first_k != "" ? first_k : b_keys[1])
+                            js_all = js_all json_s
+                            li_all = li_all "<li><a href=\"#" anchor_id "\">" b_title "</a></li>\n"
+                            rf_all = rf_all ref_key "\t" anchor_id "\n"
+                            acc_preblock = (acc_preblock == "" ? html : acc_preblock "\x03" html)
+                            in_def = 0
+                        } else {
+                            buf[++buf_len] = raw_line
+                            if (index(raw_line, btt_str) > 0) bail = 1
+                            else if (index(raw_line, "<pre") > 0) bail = 1
+                            else if (index(raw_line, "$$") > 0) bail = 1
+                            else if (index(raw_line, "block.tex") > 0) bail = 1
+                            else if (index(raw_line, "block.code") > 0) bail = 1
+                        }
+                    }
+                }
+                END {
+                    if (acc_preblock != "") {
+                        print "%%PREBLOCK%%" acc_preblock
+                    }
+                    if (js_all != "") {
+                        printf "%s", js_all > f_js
+                        printf "%s", li_all > f_li
+                        printf "%s\n%s", tkey_first, rf_all > f_rf
+                    }
+                }
+            ' <<< "$raw_file")"
+            mapfile -t lines <<< "$awk_out"
+            if [[ -f "$tmp_js" ]]; then
+                local js_chunk="" li_chunk=""
+                IFS= read -r -d '' js_chunk < "$tmp_js"
+                true
+                IFS= read -r -d '' li_chunk < "$tmp_li"
+                true
+                SEARCH_INDEX_MAP["def"]+="$js_chunk"
+                LIST_HTML_MAP["def"]+="$li_chunk"
+                local -a rf_lines=()
+                mapfile -t rf_lines < "$tmp_rf"
+                if (( ${#rf_lines[@]} > 0 )); then
+                    [[ -z "${PAGE_TITLE_KEYS[def]:-}" ]] && PAGE_TITLE_KEYS["def"]="${rf_lines[0]}"
+                    if [[ -n "$w_name" ]]; then
+                        local r_i r_line ref_k anc_id
+                        for (( r_i=1; r_i<${#rf_lines[@]}; r_i++ )); do
+                            r_line="${rf_lines[$r_i]}"
+                            [[ -z "$r_line" ]] && continue
+                            ref_k="${r_line%%$'\t'*}"
+                            anc_id="${r_line#*$'\t'}"
+                            WIKI_REFS["def::${ref_k}"]="${pagename}:${anc_id}"
+                            WIKI_REFS["${w_name}::${ENV:-}::def::${ref_k}"]="${pagename}:${anc_id}"
+                        done
+                    fi
+                fi
+                rm -f "$tmp_js" "$tmp_li" "$tmp_rf"
+            fi
+        else
+            mapfile -t lines < "$file"
+        fi
+        __parse_main
+        TOC_HTML+="</ul>"
+        content="${content//\{\{TOC_PLACEHOLDER\}\}/$TOC_HTML}"
+        if [[ "$content" == *"%%WIKI_REF:"* ]]; then
+            local tmp_c="${content//%%WIKI_REF:/$'\x02'}"
+            set -f
+            local old_ifs="$IFS"
+            IFS=$'\x02'
+            local -a ref_chunks=($tmp_c)
+            IFS="$old_ifs"
+            set +f
+            local -a out_chunks=("${ref_chunks[0]}")
+            local c_idx chunk ref_part rest_html topic rem_ref ref_key label key target replacement href internal_path marker
+            local p2=$'\x25\x25'
+            for (( c_idx=1; c_idx<${#ref_chunks[@]}; c_idx++ )); do
+                chunk="${ref_chunks[$c_idx]}"
+                ref_part="${chunk%%"$p2"*}"
+                rest_html="${chunk#*"$p2"}"
+                topic="${ref_part%%:*}"
+                rem_ref="${ref_part#*:}"
+                ref_key="${rem_ref%%:*}"
+                label="${rem_ref#*:}"
+                key="${topic}::${ref_key}"
+                target="${WIKI_REFS[$key]:-}"
+                if [[ -z "$target" && -n "$w_name" ]]; then
+                    target="${WIKI_REFS[${w_name}::${ENV:-}::${key}]:-}"
+                fi
+                if [[ -z "$target" ]]; then
+                    local clean_key="${key//[^a-zA-Z0-9_.:-]/}"
+                    local k
+                    for k in "${!WIKI_REFS[@]}"; do
+                        local clean_k="${k//[^a-zA-Z0-9_.:-]/}"
+                        if [[ "$clean_k" == "$clean_key" ]]; then
+                            target="${WIKI_REFS[$k]}"
+                            break
+                        elif [[ "$clean_k" == *"::${clean_key}" ]]; then
+                            target="${WIKI_REFS[$k]}"
+                            break
+                        fi
+                    done
+                fi
+                if [[ -z "$target" ]]; then
+                    replacement="<span class=\"wiki-ref-err\">${label}</span>"
+                else
+                    local is_ext=0
+                    [[ "$target" == http://* ]] && is_ext=1
+                    [[ "$target" == https://* ]] && is_ext=1
+                    if (( is_ext == 1 )); then
+                        href="$target"
+                    else
+                        internal_path="${target%:*}"
+                        marker="${target##*:}"
+                        [[ "$target" != *":"* ]] && marker=""
+                        internal_path="${internal_path//./\/}"
+                        href="/${internal_path}.html"
+                        [[ -n "$marker" ]] && href="${href}#${marker}"
+                    fi
+                    replacement="<a class=\"wiki-topic-${topic}\" href=\"${href}\">${label}</a>"
+                fi
+                out_chunks+=("${replacement}${rest_html}")
+            done
+            old_ifs="$IFS"
+            IFS=""
+            content="${out_chunks[*]}"
+            IFS="$old_ifs"
+        fi
+        __search_index
+        __render_template
+        [[ -n "${WIKI_SEARCH_JS:-}" ]] && rendered="${rendered//%%WIKI_SEARCH_CONFIG%%/$WIKI_SEARCH_JS}"
+        printf "%s" "$rendered" > "$out_path"
+        __log "Rendered -> $out_path" -t success -l wiki
+    }   
+
+}

@@ -1,0 +1,736 @@
+#! /bin/bash
+
+_WIKI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+__wiki__() {
+
+    __load script helper    --from "$_WIKI_DIR/mods"
+    __load script partials  --from "$_WIKI_DIR/mods"
+    __load script blocks    --from "$_WIKI_DIR/mods"
+    __load script listings  --from "$_WIKI_DIR/mods"
+    __load script countings --from "$_WIKI_DIR/mods"
+    __load script parse     --from "$_WIKI_DIR/mods"
+    __load script render    --from "$_WIKI_DIR/mods"
+    __load script build     --from "$_WIKI_DIR/mods"
+    
+    __fm_val_r() {
+        local file="$1" key="$2" in_fm=0 line
+        REPLY=""
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line%$'\r'}"
+            if (( in_fm == 0 )); then
+                [[ "$line" =~ ^---\s*$ ]] && in_fm=1
+                continue
+            elif (( in_fm == 1 )); then
+                [[ "$line" =~ ^---\s*$ ]] && break
+                if [[ "$line" =~ ^[[:space:]]*${key}:(.*)$ ]]; then
+                    local val="${BASH_REMATCH[1]}"
+                    val="${val#"${val%%[![:space:]]*}"}"
+                    val="${val%"${val##*[![:space:]]}"}"
+                    val="${val#\"}"; val="${val%\"}"
+                    val="${val#\'}"; val="${val%\'}"
+                    REPLY="$val"
+                    return 0
+                fi
+            fi
+        done < "$file"
+        return 1
+    }
+
+    __wiki__.__help__() {
+    echo """ABOUT:
+    omni wiki generator and management tool
+USAGE:
+    wiki [args]
+COMMANDS:
+    ls                       List registered wikis
+    new/set                  <wiki> -p/--path <path> [-c <content>] [-d <dist>] [-t <templates>] [-s <static>] [-a <assets>] [-D <domain>]
+    rm                       <wiki>
+    pages ls                 <wiki>
+    pages new/set            <wiki> -p/--page <page_path> [-t/--template <template>]
+    pages rm                 <wiki> -p/--page <page_slug>
+    template ls              List registered templates
+    template new/set         <template> -p/--path <path>
+    template rm              <template>
+    topic ls                 List registered topics
+    topic new/set            <topic> -w/--wiki <wiki> -e/--env <env>
+    topic rm                 <topic>
+    ref ls                   List registered references
+    ref new/set              <ref> -w/--wiki <wiki> -e/--env <env> -t/--topic <topic> -v/--value <value>
+    ref rm                   <ref>
+    block ls                 List custom blocks
+    block new/set            <block> -c/--class <class>
+    block rm                 <block>
+    author ls                List registered authors
+    author new/set           <author> -w/--wiki <wiki> -n/--name <name> -u/--url <url>
+    author rm                <author>
+    build                    <wiki>[.<page>] [--rebuild] [-c] [-d] [-t] [-s] [-a] [-C/--cache <dir>] [-j/--jobs <N>]
+    serve                    <wiki> [-p/--port <port>]
+FLAGS:
+  -h, --help    Show this help""" >&2
+    }   
+
+    __wiki__.ls() {
+        declare -p WIKIS >/dev/null 2>&1 || { echo "No wikis registered."; return 0; }
+        local w
+        for w in "${WIKIS[@]}"; do
+            echo -e "$w -> ${WIKI_VARS[$w]:-}"
+        done
+    }
+
+    __wiki__.set() {
+        local w_name="$1"; shift
+        if [[ -z "$w_name" ]]; then __log "Missing wiki name." -t error -l wiki; return 1; fi
+        
+        local w_path="" w_cont="" w_dist="" w_tmpl="" w_stat="" w_assets="" w_domain=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -p|--path) w_path="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
+                -c|--contents) w_cont="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
+                -d|--dist) w_dist="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
+                -t|--template|--templates) w_tmpl="$2"; shift 2 ;;
+                -s|--static) w_stat="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
+                -a|--assets) w_assets="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
+                -D|--domain|--url) w_domain="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        
+        local current_config="${WIKI_VARS[$w_name]:-}"
+        if [[ -z "$w_path" && -z "$current_config" ]]; then
+            __log "Path (-p) is mandatory for a new wiki." -t error -l wiki; return 1
+        fi
+        
+        local -A extra_keys=()
+        if [[ -z "$current_config" ]]; then
+            [[ -n "$w_path" && -z "$w_cont" ]] && w_cont="${w_path}/content"
+            [[ -n "$w_path" && -z "$w_dist" ]] && w_dist="${w_path}/dist"
+            [[ -n "$w_path" && -z "$w_tmpl" ]] && w_tmpl="${w_path}/templates"
+            [[ -n "$w_path" && -z "$w_stat" ]] && w_stat="${w_path}/static"
+            [[ -n "$w_path" && -z "$w_assets" ]] && w_assets="${w_path}/assets"
+        else
+            local OIFS="$IFS"; IFS=','
+            for pair in $current_config; do
+                local k="${pair%%:*}" v="${pair#*:}"
+                case "$k" in
+                    path) [[ -z "$w_path" ]] && w_path="$v" ;;
+                    content) [[ -z "$w_cont" ]] && w_cont="$v" ;;
+                    dist) [[ -z "$w_dist" ]] && w_dist="$v" ;;
+                    template) [[ -z "$w_tmpl" ]] && w_tmpl="$v" ;;
+                    static) [[ -z "$w_stat" ]] && w_stat="$v" ;;
+                    assets) [[ -z "$w_assets" ]] && w_assets="$v" ;;
+                    domain|url) [[ -z "$w_domain" ]] && w_domain="$v" ;;
+                    *) extra_keys["$k"]="$v" ;;
+                esac
+            done
+            IFS="$OIFS"
+        fi
+        
+        local new_conf="path:${w_path},content:${w_cont},dist:${w_dist},template:${w_tmpl},static:${w_stat},assets:${w_assets}"
+        [[ -n "$w_domain" ]] && new_conf+=",domain:${w_domain}"
+        for k in "${!extra_keys[@]}"; do
+            new_conf+=",${k}:${extra_keys[$k]}"
+        done
+        
+        WIKI_VARS[$w_name]="$new_conf"
+        
+        local exists=0 w
+        for w in "${WIKIS[@]}"; do
+            if [[ "$w" == "$w_name" ]]; then exists=1; break; fi
+        done
+        if [[ $exists -eq 0 ]]; then WIKIS+=("$w_name"); fi
+        if [[ -n "$w_cont" && -d "$w_cont" ]]; then
+            local abs_cont="$(cd "$w_cont" && pwd)"
+            local pages_arr=()
+            while IFS= read -r -d '' file; do
+                local rel_path="${file#$abs_cont/}"
+                local no_ext="${rel_path%.md}"
+                local slug="${no_ext//\//.}"
+                pages_arr+=("$slug")
+                WIKI_PAGE_VARS["${w_name}::${slug}"]="path:${file}"
+            done < <(find "$abs_cont" -type f -name "*.md" -print0)
+            local joined_pages=$(IFS=','; echo "${pages_arr[*]}")
+            WIKI_PAGES[$w_name]="$joined_pages"
+        fi
+        
+        __save
+        __log "Configured wiki: $w_name" -t success -l wiki
+    }    
+
+
+    __wiki__.rm() {
+        local w_name="$1"
+        if [[ -z "$w_name" ]]; then __log "Missing wiki name." -t error -l wiki; return 1; fi
+        
+        local i new_wikis=()
+        for i in "${WIKIS[@]}"; do
+            [[ "$i" != "$w_name" ]] && new_wikis+=("$i")
+        done
+        WIKIS=("${new_wikis[@]}")
+        unset 'WIKI_VARS[$w_name]' 'WIKI_PAGES[$w_name]'
+        
+        for i in "${!WIKI_PAGE_VARS[@]}"; do
+            [[ "$i" == "${w_name}::"* ]] && unset 'WIKI_PAGE_VARS[$i]'
+        done
+        
+        __save
+        __log "Removed wiki: $w_name" -t success -l wiki
+    }
+
+    __wiki__.template() {
+        local subcmd="$1"
+        case "$subcmd" in
+            ls)
+                declare -p WIKI_TEMPLATES >/dev/null 2>&1 || return 0
+                local t
+                for t in "${WIKI_TEMPLATES[@]}"; do echo "$t -> ${WIKI_TEMPLATE_VARS[$t]}"; done
+                ;;
+            new|set)
+                local tmpl="$2"; shift 2
+                if [[ -z "$tmpl" ]]; then __log "Missing template name." -t error -l wiki; return 1; fi
+                local t_path=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in -p|--path) t_path="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;; *) shift ;; esac
+                done
+                if [[ -z "$t_path" ]]; then __log "Missing path." -t error -l wiki; return 1; fi
+                local exists=0 t
+                for t in "${WIKI_TEMPLATES[@]}"; do [[ "$t" == "$tmpl" ]] && { exists=1; break; }; done
+                [[ $exists -eq 0 ]] && WIKI_TEMPLATES+=("$tmpl")
+                WIKI_TEMPLATE_VARS["$tmpl"]="$t_path"
+                __save
+                __log "Saved template $tmpl" -t success -l wiki
+                ;;
+            rm)
+                local tmpl="$2"
+                local i new_tmpls=()
+                for i in "${WIKI_TEMPLATES[@]}"; do
+                    [[ "$i" != "$tmpl" ]] && new_tmpls+=("$i")
+                done
+                WIKI_TEMPLATES=("${new_tmpls[@]}")
+                unset 'WIKI_TEMPLATE_VARS[$tmpl]'
+                __save
+                __log "Removed template $tmpl" -t success -l wiki
+                ;;
+            *) __log "Unknown template command: $subcmd" -t error -l wiki; return 1 ;;
+        esac
+    }
+
+    __wiki__.pages() {
+        local subcmd="$1" w_name="$2"
+        if [[ -z "$w_name" ]]; then __log "Missing wiki name." -t error -l wiki; return 1; fi
+        
+        case "$subcmd" in
+            ls)
+                local OIFS="$IFS"; IFS=','
+                local p
+                for p in ${WIKI_PAGES[$w_name]:-}; do
+                    echo "$p -> ${WIKI_PAGE_VARS[${w_name}::${p}]:-}"
+                done
+                IFS="$OIFS"
+                ;;
+            new|set)
+                shift 2
+                local p_path="" p_tmpl=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -p|--page) p_path="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
+                        -t|--template) p_tmpl="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                if [[ -z "$p_path" ]]; then __log "Missing page path." -t error -l wiki; return 1; fi
+                local slug="${p_path##*/}"; slug="${slug%.md}"
+                local pages="${WIKI_PAGES[$w_name]:-}"
+                if [[ -z "$pages" ]]; then pages="$slug"; else
+                    if [[ ",${pages}," != *",$slug,"* ]]; then pages="$pages,$slug"; fi
+                fi
+                WIKI_PAGES[$w_name]="$pages"
+                local var_str="path:${p_path}"
+                [[ -n "$p_tmpl" ]] && var_str+=",template:${p_tmpl}"
+                WIKI_PAGE_VARS["${w_name}::${slug}"]="$var_str"
+                __save
+                __log "Saved page $slug in $w_name" -t success -l wiki
+                ;;
+            rm)
+                shift 2
+                local p_slug=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -p|--page) p_slug="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                if [[ -z "$p_slug" ]]; then __log "Missing page slug." -t error -l wiki; return 1; fi
+                local pages="${WIKI_PAGES[$w_name]:-}"
+                local OIFS="$IFS"; IFS=','
+                local new_pages=() p
+                for p in $pages; do
+                    [[ "$p" != "$p_slug" ]] && new_pages+=("$p")
+                done
+                local joined_pages=$(IFS=','; echo "${new_pages[*]}")
+                IFS="$OIFS"
+                WIKI_PAGES[$w_name]="$joined_pages"
+                unset 'WIKI_PAGE_VARS['"${w_name}::${p_slug}"']'
+                __save
+                __log "Removed page $p_slug from $w_name" -t success -l wiki
+                ;;
+            *) __log "Unknown pages command: $subcmd" -t error -l wiki; return 1 ;;
+        esac
+    }
+
+    __wiki__.topic() {
+        local subcmd="$1"
+        case "$subcmd" in
+            ls)
+                declare -p WIKI_TOPICS >/dev/null 2>&1 || return 0
+                local k
+                for k in "${!WIKI_TOPICS[@]}"; do echo "$k -> ${WIKI_TOPICS[$k]}"; done
+                ;;
+            new|set)
+                local topic="$2"; shift 2
+                if [[ -z "$topic" ]]; then __log "Missing topic name." -t error -l wiki; return 1; fi
+                local w_name="" env=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -w|--wiki) w_name="$2"; shift 2 ;;
+                        -e|--env) env="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                
+                declare -p WIKI_TOPICS >/dev/null 2>&1 || declare -g -A WIKI_TOPICS=()
+                
+                WIKI_TOPICS["${w_name}::${env}::${topic}"]="1"
+                __save
+                __log "Saved topic ${topic} (wiki: ${w_name}, env: ${env})" -t success -l wiki
+                ;;
+            rm)
+                local topic="$2" k
+                for k in "${!WIKI_TOPICS[@]}"; do
+                    if [[ "$k" == *"::${topic}" ]]; then unset 'WIKI_TOPICS[$k]'; fi
+                done
+                __save
+                __log "Removed topic $topic" -t success -l wiki
+                ;;
+            *) __log "Unknown topic command: $subcmd" -t error -l wiki; return 1 ;;
+        esac
+    }
+
+    __wiki__.ref() {
+        local subcmd="$1"
+        case "$subcmd" in
+            ls)
+                declare -p WIKI_REFS >/dev/null 2>&1 || return 0
+                local k
+                for k in "${!WIKI_REFS[@]}"; do echo "$k -> ${WIKI_REFS[$k]}"; done
+                ;;
+            new|set)
+                local ref="$2"; shift 2
+                if [[ -z "$ref" ]]; then __log "Missing ref name." -t error -l wiki; return 1; fi
+                local w_name="" env="" topic="" val=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -w|--wiki) w_name="$2"; shift 2 ;;
+                        -e|--env) env="$2"; shift 2 ;;
+                        -t|--topic) topic="$2"; shift 2 ;;
+                        -v|--value) val="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                
+                declare -p WIKI_REFS >/dev/null 2>&1 || declare -g -A WIKI_REFS=()
+                
+                WIKI_REFS["${w_name}::${env}::${topic}::${ref}"]="$val"
+                __save
+                __log "Saved reference ${ref} for topic ${topic}" -t success -l wiki
+                ;;
+            rm)
+                local ref="$2" k
+                for k in "${!WIKI_REFS[@]}"; do
+                    if [[ "$k" == *"::${ref}" ]]; then unset 'WIKI_REFS[$k]'; fi
+                done
+                __save
+                __log "Removed references for $ref" -t success -l wiki
+                ;;
+            *) __log "Unknown ref command: $subcmd" -t error -l wiki; return 1 ;;
+        esac
+    }
+
+    __wiki__.block() {
+        local subcmd="$1"
+        case "$subcmd" in
+            ls)
+                declare -p WIKI_BLOCKS >/dev/null 2>&1 || return 0
+                local k
+                for k in "${!WIKI_BLOCKS[@]}"; do echo "$k -> ${WIKI_BLOCKS[$k]}"; done
+                ;;
+            new|set)
+                local blk="$2"; shift 2
+                if [[ -z "$blk" ]]; then __log "Missing block name." -t error -l wiki; return 1; fi
+                local cls=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in -c|--class) cls="$2"; shift 2 ;; *) shift ;; esac
+                done
+                WIKI_BLOCKS["$blk"]="$cls"
+                __save
+                __log "Saved block $blk with class $cls" -t success -l wiki
+                ;;
+            rm)
+                local blk="$2"
+                unset 'WIKI_BLOCKS[$blk]'
+                __save
+                __log "Removed block $blk" -t success -l wiki
+                ;;
+            *) __log "Unknown block command: $subcmd" -t error -l wiki; return 1 ;;
+        esac
+    }
+
+    __wiki__.author() {
+        local subcmd="$1"
+        case "$subcmd" in
+            ls)
+                declare -p WIKI_AUTHORS >/dev/null 2>&1 || return 0
+                local k
+                for k in "${!WIKI_AUTHORS[@]}"; do echo "$k -> ${WIKI_AUTHORS[$k]}"; done
+                ;;
+            new|set)
+                local author="$2"; shift 2
+                [[ -z "$author" ]] && return 1
+                local w_name="" a_name="" a_url=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        -w|--wiki) w_name="$2"; shift 2 ;;
+                        -n|--name) a_name="$2"; shift 2 ;;
+                        -u|--url) a_url="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                declare -p WIKI_AUTHORS >/dev/null 2>&1 || declare -g -A WIKI_AUTHORS=()
+                WIKI_AUTHORS["${w_name}::${author}"]="name:\"${a_name}\",url:\"${a_url}\""
+                __save
+                ;;
+            rm)
+                local author="$2" k
+                for k in "${!WIKI_AUTHORS[@]}"; do
+                    [[ "$k" == *"::${author}" ]] && unset 'WIKI_AUTHORS[$k]'
+                done
+                __save
+                ;;
+            *) return 1 ;;
+        esac
+    }
+
+    __wiki__.build() {
+        # Byte semantics speed up string matching. Measure text with __char_len, not ${#var}.
+        local LC_ALL=C
+        declare -gA SEARCH_INDEX_MAP=() LIST_HTML_MAP=() BLOCK_TITLE_KEYS=() PAGE_TITLE_KEYS=() LATEX_MEM_CACHE=()
+        declare -p WIKIS >/dev/null 2>&1 || declare -g -a WIKIS=()
+        
+        local target="$1"; shift || true
+        local rebuild=0
+        if [[ "$target" == "--rebuild" || -z "$target" ]]; then
+             rebuild=1
+            target="${WIKIS[0]:-}"
+        fi
+        
+        local o_cont="" o_dist="" o_tmpl="" o_stat="" o_assets="" o_cache="" o_jobs=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -c|--contents) o_cont="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
+                -d|--dist) o_dist="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
+                -t|--templates|--template) o_tmpl="$2"; shift 2 ;;
+                -s|--static) o_stat="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
+                -a|--assets) o_assets="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
+                -j|--jobs) o_jobs="$2"; shift 2 ;;
+                -C|--cache)
+                     if [[ "$2" == /* ]]; then o_cache="$2"; else o_cache="$PWD/$2"; fi
+                    shift 2 ;;
+                --rebuild) rebuild=1; shift ;;
+                *) shift ;;
+            esac
+        done
+        
+        local w_name="${target%%.*}"
+        local p_name=""
+        if [[ "$target" == *.* ]]; then p_name="${target#*.}"; fi
+        if [[ -z "$w_name" ]]; then
+            __log "No wiki specified or registered." -t error -l wiki
+            return 1
+        fi
+        local w_config="${WIKI_VARS[$w_name]:-}"
+        if [[ -z "$w_config" ]]; then
+            __log "Wiki '$w_name' is not configured." -t error -l wiki
+            return 1
+        fi
+        
+        local SOURCEDIR="" BUILDDIR="" TEMPLATEDIR="" STATICDIR="" ASSETSDIR=""
+        local OIFS="$IFS"; IFS=','
+        local pair k v
+        for pair in $w_config; do
+            k="${pair%%:*}" v="${pair#*:}"
+            case "$k" in
+                content) SOURCEDIR="$v" ;;
+                dist) BUILDDIR="$v" ;;
+                template) TEMPLATEDIR="$v" ;;
+                static) STATICDIR="$v" ;;
+                assets) ASSETSDIR="$v" ;;
+            esac
+        done
+        IFS="$OIFS"
+        
+        [[ -n "$o_cont" ]] && SOURCEDIR="$o_cont"
+        [[ -n "$o_dist" ]] && BUILDDIR="$o_dist"
+        [[ -n "$o_tmpl" ]] && TEMPLATEDIR="$o_tmpl"
+        [[ -n "$o_stat" ]] && STATICDIR="$o_stat"
+        [[ -n "$o_assets" ]] && ASSETSDIR="$o_assets"
+        
+        local -a _pages=() _global_pages=() _nested_pages=() _SORTED_PAGES_LEAF_FIRST=() build_targets=()
+        local WIKI_MENU_HTML="" WIKI_FEATURED_HTML="" WIKI_SEARCH_JS=""
+        local -A PAGE_TITLES=() PAGE_WEIGHTS=() PAGE_TEMPLATES=() PAGE_TAGS=() PAGE_THUMBS=() PAGE_RELATED=() DIR_FILES_MAP=() CACHE_HASHES=() IS_DIR_PAGE=() DIR_BEST_PAGE=() DIR_BEST_WEIGHT=() SEARCH_BLOCK_TYPES=()
+        local -A DIRTY_PAGES=() PAGE_FILES=() PAGE_MTIME_SIZE=()
+        
+        local cache_dir="${o_cache:-$BUILDDIR/.cache}"
+        local cache_file="$cache_dir/build_cache"
+        local tmpl_cache_file="$cache_dir/tmpl_cache"
+        local meta_cache_file="$cache_dir/meta.cache"
+        local force_rebuild=$rebuild
+        local SHORT_CIRCUIT=0
+        local max_jobs="${o_jobs:-}"
+        [[ -z "$max_jobs" ]] && max_jobs="$(nproc 2>/dev/null || echo 4)"
+        (( max_jobs < 1 )) && max_jobs=4
+        
+        __build_cache
+        __build_init
+        if (( SHORT_CIRCUIT == 1 )); then
+            __log "Wiki '$w_name' is up to date (no changes detected)." -t success -l wiki
+            return 0
+        fi
+        __build_assets
+        __build_partials
+        __build_main
+        __build_search_index
+        __build_defs_index
+        __build_sitemap
+        return 0
+    }   
+
+    __wiki__.serve() {
+        local w_name="$1"
+        shift || true
+        local port="8080"
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -p|--port) port="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        if [[ -z "$w_name" ]]; then
+            __log "No wiki specified." -t error -l wiki
+            return 1
+        fi
+        local w_config="${WIKI_VARS[$w_name]:-}"
+        if [[ -z "$w_config" ]]; then
+            __log "Wiki '$w_name' is not configured." -t error -l wiki
+            return 1
+        fi
+        local BUILDDIR=""
+        local IFS=',' pair k v
+        for pair in $w_config; do
+            k="${pair%%:*}" v="${pair#*:}"
+            [[ "$k" == "dist" ]] && BUILDDIR="$v"
+        done
+        if [[ -z "$BUILDDIR" || ! -d "$BUILDDIR" ]]; then
+            __log "Wiki dist directory not found for '$w_name'." -t error -l wiki
+            return 1
+        fi
+        __log "Serving '$w_name' ($BUILDDIR) on port $port... (Press Ctrl+C to stop)" -t info -l wiki
+        if command -v $_WIKI_DIR/bin/server >/dev/null 2>&1; then
+            (cd "$BUILDDIR" && $_WIKI_DIR/bin/server "$port")
+        
+        elif command -v nc >/dev/null 2>&1; then
+            __log "Python not found. Falling back to basic 'nc' server (Single-threaded)." -t info -l wiki
+            (
+                cd "$BUILDDIR" || exit 1
+                local pipe="/tmp/wiki_serve_$$"
+                trap 'rm -f "$pipe"' EXIT INT TERM
+                mkfifo "$pipe"
+                local nc_cmd="nc -l $port"
+                nc -h 2>&1 | grep -q '\-p' && nc_cmd="nc -l -p $port"
+                while true; do
+                    eval "$nc_cmd" < "$pipe" | (
+                        read -r line
+                        line="${line%%$'\r'}"
+                        local req_path="${line#* }"
+                        req_path="${req_path%% *}"
+                        [[ "$req_path" == "/" || -z "$req_path" ]] && req_path="/index.html"
+                        local target=".${req_path}"
+                        if [[ -f "$target" ]]; then
+                            local mime="text/plain"
+                            [[ "$target" == *".html" ]] && mime="text/html"
+                            [[ "$target" == *".css" ]] && mime="text/css"
+                            [[ "$target" == *".js" ]] && mime="application/javascript"
+                            echo -ne "HTTP/1.1 200 OK\r\nContent-Type: $mime\r\n\r\n" > "$pipe"
+                            cat "$target" > "$pipe"
+                        else
+                            echo -ne "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\n\r\n<h1>404 Not Found</h1>" > "$pipe"
+                        fi
+                    )
+                done
+            )
+        else
+            __log "neither server bin nor nc was found." -t error -l wiki
+            return 1
+        fi
+    }
+
+    wiki() {
+        local reset_patsub=0
+        if shopt -q patsub_replacement 2>/dev/null; then
+            shopt -u patsub_replacement
+            reset_patsub=1
+        fi
+        local cmd="$1"; shift || true
+        case "$cmd" in
+            ls) __wiki__.ls "$@" ;;
+            new|set) __wiki__.set "$@" ;;
+            rm) __wiki__.rm "$@" ;;
+            pages) __wiki__.pages "$@" ;;
+            template) __wiki__.template "$@" ;;
+            topic) __wiki__.topic "$@" ;;
+            ref) __wiki__.ref "$@" ;;
+            block) __wiki__.block "$@" ;;
+            author) __wiki__.author "$@" ;;
+            build|--rebuild) __wiki__.build "$@" ;;
+            serve) __wiki__.serve "$@" ;;
+            -h|--help|"") __wiki__.__help__ ;;
+            *) __log "Unknown command '$cmd' for wiki." -t error -l wiki; __wiki__.__help__; false ;;
+        esac
+        local ret=$?
+        if (( reset_patsub == 1 )); then
+            shopt -s patsub_replacement
+        fi
+        return $ret
+    }
+
+    wiki.__compl__() {
+        local cur="${COMP_WORDS[COMP_CWORD]}" prev="${COMP_WORDS[COMP_CWORD-1]}" base_cmd="${COMP_WORDS[1]:-}"
+        
+        if [[ "$prev" == "-t" || "$prev" == "--template" || "$prev" == "--templates" ]]; then
+            declare -p WIKI_TEMPLATES >/dev/null 2>&1 && COMPREPLY=( $(compgen -W "${WIKI_TEMPLATES[*]}" -- "$cur") )
+            return 0
+        fi
+        if [[ "${COMP_CWORD}" == 1 ]]; then
+            COMPREPLY=( $(compgen -W "ls new set rm pages template topic ref block author build serve --rebuild --help -h" -- "$cur") )
+            return 0
+        fi
+        
+        case "$base_cmd" in
+            rm|serve)
+                if [[ "${COMP_CWORD}" == 2 ]]; then
+                    declare -p WIKIS >/dev/null 2>&1 && COMPREPLY=( $(compgen -W "${WIKIS[*]}" -- "$cur") )
+                elif [[ "$base_cmd" == "serve" && "$cur" == -* ]]; then
+                    COMPREPLY=( $(compgen -W "-p --port" -- "$cur") )
+                fi
+                ;;
+            new|set)
+                if [[ "$cur" == -* ]]; then
+                    COMPREPLY=( $(compgen -W "-p --path -c --contents -d --dist -t --templates --template -s --static -a --assets -D --domain --url" -- "$cur") )
+                elif [[ "${COMP_CWORD}" == 2 ]]; then
+                    declare -p WIKIS >/dev/null 2>&1 && COMPREPLY=( $(compgen -W "${WIKIS[*]}" -- "$cur") )
+                fi
+                ;;
+            pages)
+                local subcmd="${COMP_WORDS[2]:-}"
+                if [[ "${COMP_CWORD}" == 2 ]]; then
+                    COMPREPLY=( $(compgen -W "ls new set rm" -- "$cur") )
+                elif [[ "${COMP_CWORD}" == 3 ]]; then
+                    declare -p WIKIS >/dev/null 2>&1 && COMPREPLY=( $(compgen -W "${WIKIS[*]}" -- "$cur") )
+                elif [[ "$subcmd" == "new" || "$subcmd" == "set" ]]; then
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=( $(compgen -W "-p --page -t --template" -- "$cur") )
+                    fi
+                elif [[ "$subcmd" == "rm" ]]; then
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=( $(compgen -W "-p --page" -- "$cur") )
+                    elif [[ "$prev" == "-p" || "$prev" == "--page" ]]; then
+                        local w_name="${COMP_WORDS[3]}"
+                        declare -p WIKI_PAGES >/dev/null 2>&1 && COMPREPLY=( $(compgen -W "${WIKI_PAGES[$w_name]//,/ }" -- "$cur") )
+                    fi
+                fi
+                ;;
+            template)
+                local subcmd="${COMP_WORDS[2]:-}"
+                if [[ "${COMP_CWORD}" == 2 ]]; then
+                    COMPREPLY=( $(compgen -W "ls new set rm" -- "$cur") )
+                elif [[ "$subcmd" == "rm" && "${COMP_CWORD}" == 3 ]]; then
+                    declare -p WIKI_TEMPLATES >/dev/null 2>&1 && COMPREPLY=( $(compgen -W "${WIKI_TEMPLATES[*]}" -- "$cur") )
+                elif [[ "$subcmd" == "new" || "$subcmd" == "set" ]]; then
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=( $(compgen -W "-p --path" -- "$cur") )
+                    fi
+                fi
+                ;;
+            topic)
+                local subcmd="${COMP_WORDS[2]:-}"
+                if [[ "${COMP_CWORD}" == 2 ]]; then
+                    COMPREPLY=( $(compgen -W "ls new set rm" -- "$cur") )
+                elif [[ "$subcmd" == "new" || "$subcmd" == "set" ]]; then
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=( $(compgen -W "-w --wiki -e --env" -- "$cur") )
+                    fi
+                fi
+                ;;
+            ref)
+                local subcmd="${COMP_WORDS[2]:-}"
+                if [[ "${COMP_CWORD}" == 2 ]]; then
+                    COMPREPLY=( $(compgen -W "ls new set rm" -- "$cur") )
+                elif [[ "$subcmd" == "new" || "$subcmd" == "set" ]]; then
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=( $(compgen -W "-w --wiki -e --env -t --topic -v --value" -- "$cur") )
+                    fi
+                fi
+                ;;
+            block)
+                local subcmd="${COMP_WORDS[2]:-}"
+                if [[ "${COMP_CWORD}" == 2 ]]; then
+                    COMPREPLY=( $(compgen -W "ls new set rm" -- "$cur") )
+                elif [[ "$subcmd" == "rm" && "${COMP_CWORD}" == 3 ]]; then
+                    declare -p WIKI_BLOCKS >/dev/null 2>&1 && COMPREPLY=( $(compgen -W "${!WIKI_BLOCKS[*]}" -- "$cur") )
+                elif [[ "$subcmd" == "new" || "$subcmd" == "set" ]]; then
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=( $(compgen -W "-c --class" -- "$cur") )
+                    fi
+                fi
+                ;;
+            author)
+                local subcmd="${COMP_WORDS[2]:-}"
+                if [[ "${COMP_CWORD}" == 2 ]]; then
+                    COMPREPLY=( $(compgen -W "ls new set rm" -- "$cur") )
+                elif [[ "$subcmd" == "new" || "$subcmd" == "set" ]]; then
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=( $(compgen -W "-w --wiki -n --name -u --url" -- "$cur") )
+                    fi
+                fi
+                ;;
+            build)
+                if [[ "${COMP_CWORD}" == 2 ]]; then
+                    if [[ "$cur" == *.* ]]; then
+                        local w_name="${cur%%.*}"
+                        local p_prefix="${cur#*.}"
+                        local IFS=',' p pages=""
+                        for p in ${WIKI_PAGES[$w_name]:-}; do pages+=" ${w_name}.${p}"; done
+                        COMPREPLY=( $(compgen -W "$pages" -- "$cur") )
+                    else
+                        declare -p WIKIS >/dev/null 2>&1 && COMPREPLY=( $(compgen -W "${WIKIS[*]}" -- "$cur") )
+                    fi
+                elif [[ "$cur" == -* ]]; then
+                    COMPREPLY=( $(compgen -W "-c --contents -d --dist -t --templates --template -s --static -a --assets -C --cache" -- "$cur") )
+                fi
+                ;;
+        esac
+    }
+
+    __wiki__.__init__() {
+        __compl wiki
+    }
+}

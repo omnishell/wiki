@@ -1,0 +1,83 @@
+OMNI WIKI TOOL - DOCUMENTATION
+==============================
+
+ABOUT
+-----
+Omni `wiki` is a static site generator and management tool built into the Omni Shell Framework. It converts Markdown files into linked HTML sites with built-in support for custom blocks, diagrams, and cross-referencing.
+
+CLI COMMANDS
+------------
+Usage: `wiki <command> [args]`
+* ls            : List registered wikis.
+* new/set       : Create/update a wiki (`wiki new <name> -p <path>`). Options: `-c` (content), `-d` (dist), `-t` (templates), `-s` (static).
+* rm            : Remove a wiki configuration.
+* pages         : Manage pages (`ls`, `new/set -p <path>`, `rm -p <slug>`).
+* template      : Manage layouts (`ls`, `new/set -p <path>`, `rm`).
+* topic / ref   : Manage cross-page references (`wiki ref new/set <ref> -w <wiki> -e <env> -t <topic> -v <value>`).
+* block         : Manage custom div blocks (`wiki block new <name> -c <css_class>`).
+* build         : Compile wiki to HTML (`wiki build <wiki>`). Use `--rebuild` to force full compile.
+* serve         : Start a local HTTP server (`wiki serve <wiki> -p <port>`).
+
+PAGE CONFIGURATION (FRONTMATTER)
+--------------------------------
+Pages support YAML-style frontmatter enclosed in `---`.
+* `title`: Sets the display name of the page.
+* `weight`: Controls sorting order in the sidebar and featured menus. Smaller numbers appear first (default is 9999 for unweighted pages).
+
+MARKDOWN & INLINE FORMATTING
+----------------------------
+* Links: `[Text](file.md)` automatically converts `.md` extensions to `.html`.
+* Bold: `__text__`
+* Italic: `_text_`
+* Insert/Underline: `++text++`
+* Code: `` `code` ``
+
+ANCHORS & CROSS-REFERENCES
+--------------------------
+* Create Anchor : `{{#marker_name}}`
+* Link to Anchor: `{{=marker_name}}`
+* Topic Link    : `{{<topic>:<ref>}}` (Displays the ref name as the text link).
+* Custom Label  : `{{<topic>:<ref>:<label>}}` (Displays the custom label as the text link).
+
+SPECIAL PLACEHOLDERS
+--------------------
+Place these exactly as shown on their own lines:
+* `{{ toc }}`   : Renders a Table of Contents based on heading levels (`#` to `######`).
+* `{{ files }}` : Renders a list of links to sibling files in the current directory.
+
+CUSTOM BLOCKS
+-------------
+Wrap content using double curly braces to open and `{{end}}` to close:
+{{block_name}}
+... content ...
+{{end}}
+
+1. Built-in `table`: Renders ASCII tables to HTML.
+2. Built-in `diagram`: Renders custom SVG diagrams from textual node/arrow definitions.
+3. Built-in `def`: Structured definition block. Supports inline code blocks.
+   Syntax:
+   {{def}}
+   :: term: <term>
+   :: context: <category>
+   :: idea: <core idea text>
+   :: details: <extended details text>
+   :: related: <comma-separated list of refs, e.g., context.term1, context.term2>
+   {{end}}
+   (Automatically generates a reference anchor: `{{def:context.term}}`).
+4. Custom Blocks: User-defined via `wiki block new <name> -c <class>`, wraps content in `<div class="class">...</div>`.
+
+LAYOUTS & TEMPLATING
+--------------------
+HTML layouts support Jinja-like placeholders replaced during `wiki build`:
+* `{{ body }}`       : The parsed Markdown content.
+* `{{ pagename }}`   : The page title.
+* `{{ menu }}`       : The auto-generated sidebar tree (sorted by weight).
+* `{{ menu <args> }}`: A per-page sidebar tree. Args: `root`, `depth`, `type` (dir|file),
+                      `root_label`, `page_label` (title|name|weight), `exclude`, `closed` (depth from
+                      which folders start collapsed) and `open_current=1` (keep the current page's
+                      folders open despite `closed`, and mark its link with `aria-current="page"`).
+* `{{ featured }}`   : The top-level featured pages menu.
+* `{{ head <args> }}`: The `<head>` boilerplate. Args: `title`, `css` (one URL, or several
+                      comma-separated URLs loaded in order), `js` and `thumb`.
+* `{{ page.<key> }}` : Any custom key defined in the page's frontmatter.
+* `{{ year }}` / `{{ now }}`: Current year / build timestamp.
