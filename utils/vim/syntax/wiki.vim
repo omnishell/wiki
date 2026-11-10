@@ -170,7 +170,7 @@ highlight default link wikiItalicDelim Comment
 highlight wikiBold ctermfg=2 cterm=bold,underline
 highlight default link wikiBoldDelim Comment
 highlight default link wikiCodeDelim Comment
-highlight wikiCode ctermfg=13 cterm=underline
+highlight wikiCode ctermfg=13 ctermbg=8
 highlight! link wikiCodeBlockBody wikiCode
 highlight default link wikiTexDelim Comment
 
