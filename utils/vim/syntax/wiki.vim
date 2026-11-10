@@ -77,13 +77,13 @@ syntax match wikiTitleDelimiter /^\s*#\+/ display nextgroup=wikiTitleSpaces
 syntax match wikiTitleSpaces /\s\+/ contained display nextgroup=wikiTitleText
 syntax match wikiTitleText /.*$/ contained display
 
-" lists: "<n>. <something>" and "- <something>"
-syntax match wikiListMarker /^\s*\zs\(-\)\ze\s\+/ display
-syntax match wikiOrderedListMarker /^\s*\zs\d\+[.)]\ze\s\+/ display
+" lists: "<n>. <something>" and "- <something>" (works both at root and after ':: ')
+syntax match wikiListMarker /\%(^\s*\%(::\s*\)\?\)\@<=-\ze\s\+/ display containedin=ALLBUT,@wikiNoOverride
+syntax match wikiOrderedListMarker /\%(^\s*\%(::\s*\)\?\)\@<=\d\+[.)]\ze\s\+/ display containedin=ALLBUT,@wikiNoOverride
 
 " line: ":: <entry>: <arg>=xxx, <arg>=yyy"
 syntax match wikiRefsLine /^\s*::\s*__refs__:.*$/ display containedin=ALLBUT,@wikiNoOverride contains=wikiKeyword,@NoSpell
-syntax match wikiColons /^\s*::\s*/ display containedin=ALLBUT,@wikiNoOverride contains=wikiRefsLine nextgroup=wikiKeyword
+syntax match wikiColons /^\s*::\s*/ display containedin=ALLBUT,@wikiNoOverride contains=wikiRefsLine nextgroup=wikiKeyword,wikiListMarker,wikiOrderedListMarker
 syntax match wikiInnerColons /^\s*::\s*/ contained display
 syntax match wikiKeyword /[a-zA-Z0-9_-]\+:/ contained display
 syntax match wikiArgName /\(^\s*::.*\)\@<=\<[a-zA-Z0-9_-]\+\ze=/ display containedin=ALLBUT,@wikiNoOverride nextgroup=wikiArgEquals
@@ -94,10 +94,10 @@ syntax match wikiArgSeparator /\(^\s*::.*\)\@<=,/ display containedin=ALLBUT,@wi
 
 " blocks: "{{ block.<name> }}"
 syntax match wikiBlockBraces /{{\|}}/ contained display
-syntax match wikiBlockWord /[a-zA-Z0-9_-]\+/ contained display
-syntax match wikiBlockNamespace /[a-zA-Z0-9_-]\+\ze\./ contained display
-syntax match wikiBlockDot /\./ contained display
-syntax match wikiBlockName /\(\.\)\@<=[a-zA-Z0-9_-]\+/ contained display
+syntax match wikiBlockWord /\.\@<!\<[a-zA-Z0-9_-]\+\>\.\@!/ contained display
+syntax match wikiBlockNamespace /\.\@<!\<[a-zA-Z0-9_-]\+\ze\./ contained display nextgroup=wikiBlockDot
+syntax match wikiBlockDot /\./ contained display nextgroup=wikiBlockName
+syntax match wikiBlockName /[a-zA-Z0-9_-]\+/ contained display nextgroup=wikiBlockDot
 
 " html: "<tag class='...'>...</tag>"
 syntax region wikiCustomHtmlTag matchgroup=wikiHtmlBlock start=/<\/\?/ end=/>/ containedin=ALLBUT,@wikiNoOverride oneline display contains=wikiHtmlTagName,wikiHtmlArgName,wikiHtmlArgEquals,wikiHtmlArgString
@@ -170,7 +170,7 @@ highlight default link wikiItalicDelim Comment
 highlight wikiBold ctermfg=2 cterm=bold,underline
 highlight default link wikiBoldDelim Comment
 highlight default link wikiCodeDelim Comment
-highlight wikiCode ctermfg=13 ctermbg=8
+highlight wikiCode ctermfg=13
 highlight! link wikiCodeBlockBody wikiCode
 highlight default link wikiTexDelim Comment
 
@@ -181,8 +181,8 @@ highlight wikiLinkUrl ctermfg=4 cterm=underline
 highlight wikiLinkText ctermfg=5
 highlight wikiTitleDelimiter ctermfg=5
 highlight wikiTitleText ctermfg=12 cterm=underline
-highlight default link wikiListMarker Statement
-highlight default link wikiOrderedListMarker Statement
+highlight! link wikiListMarker Constant
+highlight! link wikiOrderedListMarker Constant
 
 highlight default link wikiColons Comment
 highlight default link wikiInnerColons Comment
@@ -194,10 +194,10 @@ highlight default link wikiArgSeparator Operator
 highlight default link wikiArgString String
 
 highlight default link wikiBlockBraces Comment
-highlight default link wikiBlockWord Title
-highlight wikiBlockNamespace ctermfg=5
+highlight! link wikiBlockWord Title
+highlight wikiBlockNamespace ctermfg=14
 highlight default link wikiBlockDot Comment
-highlight default link wikiBlockName Type
+highlight wikiBlockName ctermfg=5
 
 highlight! link wikiPlainBlockBody Normal
 
