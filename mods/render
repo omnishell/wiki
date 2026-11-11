@@ -373,7 +373,7 @@ __render__() {
                     }
                     return l
                 }
-                function parse_field(fv,    n, flines, base_ind, i, l, trimmed, ind, out, btt, l_depth, l_ind, l_typ, is_li, ltype) {
+                function parse_field(fv,    n, flines, base_ind, i, l, trimmed, ind, out, btt, l_depth, l_ind, l_typ, is_li, ltype, li_tag, num_val) {
                     btt = sprintf("%c%c%c", 96, 96, 96)
                     gsub(/\t/, "    ", fv)
                     gsub(/\xc2\xa0/, " ", fv)
@@ -407,6 +407,7 @@ __render__() {
                         trimmed = l
                         sub(/^[ \t]+/, "", trimmed)
                         is_li = 0
+                        li_tag = "<li>"
                         if (trimmed ~ /^[-*+][ \t]+/) {
                             is_li = 1
                             ind = length(l) - length(trimmed)
@@ -417,6 +418,9 @@ __render__() {
                             is_li = 1
                             ind = length(l) - length(trimmed)
                             ltype = "ol"
+                            num_val = trimmed
+                            sub(/\.[ \t]+.*$/, "", num_val)
+                            li_tag = "<li value=\"" num_val "\">"
                             sub(/^[0-9]+\.[ \t]+/, "", trimmed)
                             l = trimmed
                         } else if (l_depth > 0) {
@@ -432,10 +436,10 @@ __render__() {
                         if (is_li) {
                             if (l_depth == 0) {
                                 l_ind[l_depth] = ind; l_typ[l_depth] = ltype; l_depth++
-                                out = out "<" ltype "><li>" l
+                                out = out "<" ltype ">" li_tag l
                             } else if (ind > l_ind[l_depth - 1]) {
                                 l_ind[l_depth] = ind; l_typ[l_depth] = ltype; l_depth++
-                                out = out "<" ltype "><li>" l
+                                out = out "<" ltype ">" li_tag l
                             } else {
                                 while (l_depth > 0 && ind < l_ind[l_depth - 1]) {
                                     l_depth--
@@ -443,12 +447,12 @@ __render__() {
                                 }
                                 if (l_depth == 0) {
                                     l_ind[l_depth] = ind; l_typ[l_depth] = ltype; l_depth++
-                                    out = out "<" ltype "><li>" l
+                                    out = out "<" ltype ">" li_tag l
                                 } else if (l_typ[l_depth - 1] != ltype) {
-                                    out = out "</li></" l_typ[l_depth - 1] "><" ltype "><li>" l
+                                    out = out "</li></" l_typ[l_depth - 1] "><" ltype ">" li_tag l
                                     l_typ[l_depth - 1] = ltype
                                 } else {
-                                    out = out "</li><li>" l
+                                    out = out "</li>" li_tag l
                                 }
                             }
                         } else {
@@ -834,6 +838,7 @@ __render__() {
         [[ -n "${WIKI_SEARCH_JS:-}" ]] && rendered="${rendered//%%WIKI_SEARCH_CONFIG%%/$WIKI_SEARCH_JS}"
         printf "%s" "$rendered" > "$out_path"
         __log "Rendered -> $out_path" -t success -l wiki
-    }   
+    }    
+
 
 }

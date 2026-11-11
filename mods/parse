@@ -616,18 +616,22 @@ __parse__() {
                     if (( is_list == 1 )); then
                         after_block=0
                         local ltype="ul"
-                        [[ "$marker" == [0-9]* ]] && ltype="ol"
+                        local li_tag="<li>"
+                        if [[ "$marker" == [0-9]* ]]; then
+                            ltype="ol"
+                            li_tag="<li value=\"${marker%.}\">"
+                        fi
                         if (( list_depth == 0 )); then
                             out="${out%"${out##*[!$'\n']}"}"
                             LIST_INDENTS[$list_depth]="$indent"
                             LIST_TYPES[$list_depth]="$ltype"
                             list_depth=$((list_depth + 1))
-                            out+="<${ltype}><li>${l}"
+                            out+="<${ltype}>${li_tag}${l}"
                         elif (( indent > LIST_INDENTS[list_depth-1] )); then
                             LIST_INDENTS[$list_depth]="$indent"
                             LIST_TYPES[$list_depth]="$ltype"
                             list_depth=$((list_depth + 1))
-                            out+="<${ltype}><li>${l}"
+                            out+="<${ltype}>${li_tag}${l}"
                         else
                             while (( list_depth > 0 && indent < LIST_INDENTS[list_depth-1] )); do
                                 list_depth=$((list_depth - 1))
@@ -637,12 +641,12 @@ __parse__() {
                                 LIST_INDENTS[$list_depth]="$indent"
                                 LIST_TYPES[$list_depth]="$ltype"
                                 list_depth=$((list_depth + 1))
-                                out+="<${ltype}><li>${l}"
+                                out+="<${ltype}>${li_tag}${l}"
                             elif [[ "${LIST_TYPES[list_depth-1]}" != "$ltype" ]]; then
-                                out+="</li></${LIST_TYPES[list_depth-1]}><${ltype}><li>${l}"
+                                out+="</li></${LIST_TYPES[list_depth-1]}><${ltype}>${li_tag}${l}"
                                 LIST_TYPES[$list_depth-1]="$ltype"
                             else
-                                out+="</li><li>${l}"
+                                out+="</li>${li_tag}${l}"
                             fi
                         fi
                     else
@@ -755,6 +759,7 @@ __parse__() {
         REPLY="$out"
         return 0
     }    
+
 
     __parse_block_field() {
         __parse_block_field_r "$@"
