@@ -145,7 +145,7 @@ __parse__() {
 
     __parse_em() {
         if [[ "$line" == *"_"*"_"* ]]; then
-            local em_re='(^|[[:space:][:punct:]])_([a-zA-Z0-9][^_]+)_([[:space:][:punct:]]|$)'
+            local em_re='(^|[[:space:][:punct:]])_([^_[:space:]][^_]*)_([[:space:][:punct:]]|$)'
             while [[ "$line" =~ $em_re ]]; do
                 local full="${BASH_REMATCH[0]}" pre="${BASH_REMATCH[1]}" t_content="${BASH_REMATCH[2]}" post="${BASH_REMATCH[3]}"
                 if [[ "$t_content" == *"/"* || "$t_content" == *"="* ]]; then break; fi
