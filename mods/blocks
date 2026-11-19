@@ -507,429 +507,779 @@ __blocks__() {
     }   
 
     
+    __diagram_strip_quotes_r() {
+        local val="$1"
+        val="${val#"${val%%[![:space:]]*}"}"
+        val="${val%"${val##*[![:space:]]}"}"
+        if [[ ("${val:0:1}" == '"' && "${val: -1}" == '"') || ("${val:0:1}" == "'" && "${val: -1}" == "'") ]]; then
+            val="${val:1:-1}"
+        fi
+        REPLY="$val"
+    }
+
+    __diagram_split_props() {
+        local str="$1"
+        local -n _out_arr="$2"
+        _out_arr=()
+        local cur="" in_q="" char len=${#str} idx=0
+        for (( idx=0; idx<len; idx++ )); do
+            char="${str:idx:1}"
+            if [[ -z "$in_q" ]]; then
+                if [[ "$char" == '"' || "$char" == "'" ]]; then
+                    in_q="$char"
+                    cur+="$char"
+                elif [[ "$char" == ',' ]]; then
+                    cur="${cur#"${cur%%[![:space:]]*}"}"
+                    cur="${cur%"${cur##*[![:space:]]}"}"
+                    [[ -n "$cur" ]] && _out_arr+=("$cur")
+                    cur=""
+                else
+                    cur+="$char"
+                fi
+            else
+                if [[ "$char" == "$in_q" ]]; then
+                    in_q=""
+                fi
+                cur+="$char"
+            fi
+        done
+        cur="${cur#"${cur%%[![:space:]]*}"}"
+        cur="${cur%"${cur##*[![:space:]]}"}"
+        [[ -n "$cur" ]] && _out_arr+=("$cur")
+    }
+
+    __diagram_render_tex() {
+        declare -gA LATEX_MEM_CACHE 2>/dev/null || true
+        local str="$1"
+        REPLY_HTML="$str"
+        REPLY_W_TEX=0
+        REPLY_HAS_TEX=0
+        if [[ "$str" == *"$"* ]]; then
+            local math_re='^([^$]*)\$([^$]+)\$(.*)$'
+            local vb_re='viewBox="([0-9.-]+)[[:space:],]+([0-9.-]+)[[:space:],]+([0-9.-]+)[[:space:],]+([0-9.-]+)"'
+            local out=""
+            local work="$str"
+            while [[ "$work" =~ $math_re ]]; do
+                REPLY_HAS_TEX=1
+                local prefix="${BASH_REMATCH[1]}"
+                local math_code="${BASH_REMATCH[2]}"
+                local suffix="${BASH_REMATCH[3]}"
+                local cached_span="${LATEX_MEM_CACHE["inline:${math_code}"]:-}"
+                local pt_w=20
+                if [[ -z "$cached_span" ]]; then
+                    local svg_output
+                    svg_output=$("$_WIKI_DIR/bin/latex" --stdout --inline --dpr 0.4 <<< "${math_code}\\rule{0pt}{0pt}" 2>/dev/null || true)
+                    if [[ -n "$svg_output" ]]; then
+                        svg_output="${svg_output//rgba(0,0,0,1)/var(--fg)}"
+                        local min_y=0 height=0
+                        if [[ "$svg_output" =~ $vb_re ]]; then
+                            min_y="${BASH_REMATCH[2]}"
+                            height="${BASH_REMATCH[4]}"
+                            local w_val="${BASH_REMATCH[3]}"
+                            pt_w="${w_val%.*}"
+                        fi
+                        local align="-10px"
+                        local baseline_re='.*<rect x="[0-9.-]+" y="([0-9.-]+)" width="0"'
+                        [[ "$svg_output" =~ $baseline_re ]] && align="${BASH_REMATCH[1]}pt - (${min_y}pt + ${height}pt) - 1px"
+                        cached_span="<span class=\"latex-inline\" style=\"vertical-align: calc(${align});\">${svg_output}</span>"
+                        LATEX_MEM_CACHE["inline:${math_code}"]="$cached_span"
+                    else
+                        cached_span="\$${math_code}\$"
+                    fi
+                else
+                    if [[ "$cached_span" =~ $vb_re ]]; then
+                        local w_val="${BASH_REMATCH[3]}"
+                        pt_w="${w_val%.*}"
+                    fi
+                fi
+                (( REPLY_W_TEX += pt_w ))
+                out+="${prefix}${cached_span}"
+                work="$suffix"
+            done
+            out+="$work"
+            REPLY_HTML="$out"
+        fi
+    }
+
     __block_diagram() {
         if (( ${#diagram_buffer[@]} == 0 )); then return; fi
-        local -A terms=() nodes_border=() nodes_bg=() nodes_class=() nodes_text=() nodes_w=() nodes_h=()
-        local -a arrows_name=() arrows_src=() arrows_tgt=() arrows_type=() arrows_style=()
-        local min_x=999999 min_y=999999 max_x=-999999 max_y=-999999
+        local -a node_lines=() arrow_lines=()
         local line old_ifs="$IFS"
+
         for line in "${diagram_buffer[@]}"; do
-            if [[ "$line" =~ ^[[:space:]]*::[[:space:]]*(node|term)[[:space:]]*:?[[:space:]]*([^,]+)(,(.*))?$ ]]; then
-                local name="${BASH_REMATCH[2]}"
-                name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
-                local props_str="${BASH_REMATCH[4]}"
+            if [[ "$line" =~ ^[[:space:]]*::[[:space:]]*(node|term)[[:space:]]*:?[[:space:]]*(.*)$ ]]; then
+                local raw_content="${BASH_REMATCH[2]}"
+                local -a tokens=()
+                __diagram_split_props "$raw_content" tokens
+                if (( ${#tokens[@]} == 0 )); then continue; fi
+
+                local name="${tokens[0]}"
+                __diagram_strip_quotes_r "$name"; name="$REPLY"
+
                 local x=0 y=0 border="rounded" bg="default" n_class="" n_text=""
                 local x_set=0 y_set=0
-                if [[ -n "$props_str" ]]; then
-                    if [[ "$props_str" =~ text=[\"\']([^\"\']+)[\"\'] ]]; then
-                        n_text="${BASH_REMATCH[1]}"
-                        props_str="${props_str//"${BASH_REMATCH[0]}"/}"
-                    fi
-                    set -f
-                    IFS=','
-                    local -a props_array=($props_str)
-                    IFS="$old_ifs"
-                    set +f
-                    local token
-                    for token in "${props_array[@]}"; do
-                        token="${token#"${token%%[![:space:]]*}"}"; token="${token%"${token##*[![:space:]]}"}"
-                        [[ -z "$token" ]] && continue
-                        if [[ "$token" =~ ^x=(-?[0-9]+)$ ]]; then x="${BASH_REMATCH[1]}"; x_set=1
-                        elif [[ "$token" =~ ^y=(-?[0-9]+)$ ]]; then y="${BASH_REMATCH[1]}"; y_set=1
-                        elif [[ "$token" =~ ^(-?[0-9]+)$ ]]; then
-                            if (( x_set == 0 )); then x="${BASH_REMATCH[1]}"; x_set=1
-                            elif (( y_set == 0 )); then y="${BASH_REMATCH[1]}"; y_set=1; fi
-                        elif [[ "$token" == border=* ]]; then border="${token#border=}"
-                        elif [[ "$token" == bg=* ]]; then bg="${token#bg=}"
-                        elif [[ "$token" == class=* ]]; then n_class="${token#class=}"
-                        elif [[ "$token" == text=* ]]; then
-                            n_text="${token#text=}"
-                            n_text="${n_text%\"}"; n_text="${n_text#\"}"
-                            n_text="${n_text%\'}"; n_text="${n_text#\'}"
+                local idx token
+                for (( idx=1; idx<${#tokens[@]}; idx++ )); do
+                    token="${tokens[idx]}"
+                    if [[ "$token" == *=* ]]; then
+                        local k="${token%%=*}"
+                        local v="${token#*=}"
+                        __diagram_strip_quotes_r "$v"; v="$REPLY"
+                        if [[ "$k" == "x" ]]; then x="$v"; x_set=1
+                        elif [[ "$k" == "y" ]]; then y="$v"; y_set=1
+                        elif [[ "$k" == "border" ]]; then border="$v"
+                        elif [[ "$k" == "bg" ]]; then bg="$v"
+                        elif [[ "$k" == "class" ]]; then n_class="$v"
+                        elif [[ "$k" == "text" ]]; then n_text="$v"
                         fi
-                    done
+                    else
+                        __diagram_strip_quotes_r "$token"
+                        local clean_tok="$REPLY"
+                        if [[ "$clean_tok" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
+                            if (( x_set == 0 )); then x="$clean_tok"; x_set=1
+                            elif (( y_set == 0 )); then y="$clean_tok"; y_set=1
+                            fi
+                        fi
+                    fi
+                done
+
+                local display_text="${n_text:-$name}"
+                __diagram_render_tex "$display_text"
+                local text_html="$REPLY_HTML"
+                local has_tex="$REPLY_HAS_TEX"
+                local tex_w="$REPLY_W_TEX"
+
+                local -a text_lines=()
+                if [[ "$display_text" == *"\\n"* ]]; then
+                    local split_tmp="${display_text//\\n/$'\x02'}"
+                    set -f; IFS=$'\x02'; text_lines=($split_tmp); IFS="$old_ifs"; set +f
+                else
+                    text_lines=("$display_text")
                 fi
-                terms["$name"]="${x},${y}"
-                nodes_border["$name"]="$border"
-                nodes_bg["$name"]="$bg"
-                nodes_class["$name"]="$n_class"
-                nodes_text["$name"]="$n_text"
-                (( x < min_x )) && min_x=$x
-                (( x > max_x )) && max_x=$x
-                (( y < min_y )) && min_y=$y
-                (( y > max_y )) && max_y=$y
+                local max_len=0 l_str
+                for l_str in "${text_lines[@]}"; do
+                    local no_tex="${l_str//\$*\$/}"
+                    __char_len "$no_tex"
+                    (( REPLY > max_len )) && max_len=$REPLY
+                done
+                local line_count=${#text_lines[@]}
+                (( line_count == 0 )) && line_count=1
+                local w=$(( max_len * 10 + tex_w + 32 ))
+                (( w < 80 )) && w=80
+                local h=$(( line_count * 18 + 18 ))
+                (( has_tex == 1 && h < 42 )) && h=42
+
+                node_lines+=("NODE"$'\x1f'"$name"$'\x1f'"$x"$'\x1f'"$y"$'\x1f'"$w"$'\x1f'"$h"$'\x1f'"$border"$'\x1f'"$bg"$'\x1f'"$n_class"$'\x1f'"$has_tex"$'\x1f'"$display_text"$'\x1f'"$text_html")
             elif [[ "$line" =~ ^[[:space:]]*::[[:space:]]*(arrow|2-arrow)[[:space:]]*:?[[:space:]]*(.*)$ ]]; then
                 local a_type="${BASH_REMATCH[1]}"
-                local a_content="${BASH_REMATCH[2]}"
-                set -f
-                IFS=','
-                local -a tokens=($a_content)
-                IFS="$old_ifs"
-                set +f
+                local raw_content="${BASH_REMATCH[2]}"
+                local -a tokens=()
+                __diagram_split_props "$raw_content" tokens
+
                 local -a positional=()
                 local -a prop_tokens=()
                 local token
                 for token in "${tokens[@]}"; do
-                    token="${token#"${token%%[![:space:]]*}"}"; token="${token%"${token##*[![:space:]]}"}"
-                    [[ -z "$token" ]] && continue
-                    if [[ "$token" == *=* || "$token" == "dotted" || "$token" == "dashed" || "$token" == "wavy" || "$token" == "tilded" ]]; then
+                    if [[ "$token" == *=* ]]; then
                         prop_tokens+=("$token")
                     else
-                        positional+=("$token")
+                        __diagram_strip_quotes_r "$token"
+                        local clean_tok="$REPLY"
+                        if [[ "$clean_tok" == "dotted" || "$clean_tok" == "dashed" || "$clean_tok" == "wavy" || "$clean_tok" == "tilded" || "$clean_tok" == "curly" || "$clean_tok" == "straight" || "$clean_tok" == "diagonal" || "$clean_tok" == "diag" || "$clean_tok" == "normal" ]]; then
+                            prop_tokens+=("$clean_tok")
+                        else
+                            positional+=("$clean_tok")
+                        fi
                     fi
                 done
+
                 local a_name="" src="" tgt=""
                 if (( ${#positional[@]} >= 3 )); then
                     a_name="${positional[0]}"; src="${positional[1]}"; tgt="${positional[2]}"
                 elif (( ${#positional[@]} == 2 )); then
-                    a_name="${a_type}_${#arrows_src[@]}"; src="${positional[0]}"; tgt="${positional[1]}"
+                    a_name="${a_type}_${#arrow_lines[@]}"; src="${positional[0]}"; tgt="${positional[1]}"
                 elif (( ${#positional[@]} == 1 )); then
                     a_name="${positional[0]}"
                 else
-                    a_name="${a_type}_${#arrows_src[@]}"
+                    a_name="${a_type}_${#arrow_lines[@]}"
                 fi
+
                 local a_format="normal" a_angle="45" a_color="" a_label="" a_label_pos="above" a_size="" a_class="" l_style="continuous"
+                local a_x="" a_y="" has_coords=0
+
                 for token in "${prop_tokens[@]}"; do
-                    if [[ "$token" == style=* ]]; then l_style="${token#style=}"
-                    elif [[ "$token" == format=* ]]; then a_format="${token#format=}"
-                    elif [[ "$token" == angle=* ]]; then a_angle="${token#angle=}"
-                    elif [[ "$token" == color=* ]]; then a_color="${token#color=}"
-                    elif [[ "$token" == class=* ]]; then a_class="${token#class=}"
-                    elif [[ "$token" == source=* ]]; then src="${token#source=}"
-                    elif [[ "$token" == s=* ]]; then src="${token#s=}"
-                    elif [[ "$token" == target=* ]]; then tgt="${token#target=}"
-                    elif [[ "$token" == t=* ]]; then tgt="${token#t=}"
-                    elif [[ "$token" =~ ^size=([0-9]*\.?[0-9]+)$ ]]; then a_size="${BASH_REMATCH[1]}"
-                    elif [[ "$token" == "label=^"* ]]; then a_label="${token#label=^}"; a_label_pos="above"
-                    elif [[ "$token" == "label=_"* ]]; then a_label="${token#label=_}"; a_label_pos="below"
-                    elif [[ "$token" == label=* ]]; then a_label="${token#label=}"; a_label_pos="above"
-                    elif [[ "$token" == "dotted" || "$token" == "dashed" || "$token" == "wavy" || "$token" == "tilded" ]]; then
-                        l_style="$token"
-                        [[ "$token" == "tilded" ]] && l_style="wavy"
+                    if [[ "$token" == *=* ]]; then
+                        local k="${token%%=*}"
+                        local v="${token#*=}"
+                        if [[ "$k" == "label" ]]; then
+                            if [[ "$v" == ^* ]]; then a_label_pos="above"; v="${v#^}"
+                            elif [[ "$v" == _* ]]; then a_label_pos="below"; v="${v#_}"
+                            fi
+                            __diagram_strip_quotes_r "$v"; v="$REPLY"
+                            if [[ "$v" == ^* ]]; then a_label_pos="above"; v="${v#^}"
+                            elif [[ "$v" == _* ]]; then a_label_pos="below"; v="${v#_}"
+                            fi
+                            a_label="$v"
+                        else
+                            __diagram_strip_quotes_r "$v"; v="$REPLY"
+                            if [[ "$k" == "style" ]]; then l_style="$v"
+                            elif [[ "$k" == "format" ]]; then a_format="$v"
+                            elif [[ "$k" == "angle" ]]; then a_angle="$v"
+                            elif [[ "$k" == "color" ]]; then a_color="$v"
+                            elif [[ "$k" == "class" ]]; then a_class="$v"
+                            elif [[ "$k" == "source" || "$k" == "s" ]]; then src="$v"
+                            elif [[ "$k" == "target" || "$k" == "t" ]]; then tgt="$v"
+                            elif [[ "$k" == "size" ]]; then a_size="$v"
+                            elif [[ "$k" == "x" ]]; then a_x="$v"; has_coords=1
+                            elif [[ "$k" == "y" ]]; then a_y="$v"; has_coords=1
+                            fi
+                        fi
+                    else
+                        if [[ "$token" == "dotted" || "$token" == "dashed" || "$token" == "wavy" || "$token" == "tilded" ]]; then
+                            l_style="$token"
+                            [[ "$token" == "tilded" ]] && l_style="wavy"
+                        elif [[ "$token" == "curly" || "$token" == "straight" || "$token" == "diagonal" || "$token" == "diag" || "$token" == "normal" ]]; then
+                            a_format="$token"
+                        fi
                     fi
                 done
                 [[ "$a_format" == "diag" || "$a_format" == "diagonal" ]] && a_format="straight"
                 if [[ -z "$a_size" ]]; then
                     if [[ "$a_type" == "2-arrow" ]]; then a_size="0.6"; else a_size="0.9"; fi
                 fi
-                arrows_name+=("$a_name")
-                arrows_src+=("$src")
-                arrows_tgt+=("$tgt")
-                arrows_type+=("$a_type")
-                arrows_style+=("${l_style}:${a_format}:${a_angle}:${a_color}:${a_label_pos}:${a_size}:${a_class}:${a_label}")
-            fi
-        done
-        if (( ${#terms[@]} == 0 )); then return; fi
-        local GRID_X=90 GRID_Y=70 PADDING=80
-        local -A node_tspans=()
-        local term
-        for term in "${!terms[@]}"; do
-            local coords="${terms[$term]}"
-            local tx=${coords%,*} ty=${coords#*,}
-            local px=$(( (tx - min_x) * GRID_X + PADDING ))
-            local py=$(( (ty - min_y) * GRID_Y + PADDING ))
-            terms["$term"]="${px},${py}"
-            local display_text="${nodes_text[$term]:-$term}"
-            local -a text_lines=()
-            if [[ "$display_text" == *"\\n"* ]]; then
-                local split_tmp="${display_text//\\n/$'\x02'}"
-                set -f
-                IFS=$'\x02'
-                text_lines=($split_tmp)
-                IFS="$old_ifs"
-                set +f
-            else
-                text_lines=("$display_text")
-            fi
-            local max_len=0 l_str
-            for l_str in "${text_lines[@]}"; do
-                __char_len "$l_str"
-                (( REPLY > max_len )) && max_len=$REPLY
-            done
-            local line_count=${#text_lines[@]}
-            (( line_count == 0 )) && line_count=1
-            nodes_w["$term"]=$(( max_len * 10 + 32 ))
-            nodes_h["$term"]=$(( line_count * 18 + 18 ))
-            local line_height=18
-            local start_dy=$(( - (line_count - 1) * line_height / 2 ))
-            local tspans="" l
-            for (( l=0; l<line_count; l++ )); do
-                local l_dy=$(( l == 0 ? start_dy : line_height ))
-                tspans+="<tspan x=\"${px}\" dy=\"${l_dy}\">${text_lines[$l]}</tspan>"
-            done
-            node_tspans["$term"]="$tspans"
-        done
-        local svg_w=$(( (max_x - min_x) * GRID_X + PADDING * 2 ))
-        local svg_h=$(( (max_y - min_y) * GRID_Y + PADDING * 2 ))
-        local defs_html="<defs>
-            <filter id=\"wavy\" filterUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"100%\" height=\"100%\">
-                <feTurbulence type=\"fractalNoise\" baseFrequency=\"0.05\" numOctaves=\"1\" result=\"noise\"/>
-                <feDisplacementMap in=\"SourceGraphic\" in2=\"noise\" scale=\"5\" xChannelSelector=\"R\" yChannelSelector=\"G\"/>
-            </filter>
-        </defs>"
-        local layer_arrows=""
-        local layer_nodes=""
-        local pass i
-        for pass in 1 2; do
-            for (( i=0; i<${#arrows_src[@]}; i++ )); do
-                local a_type="${arrows_type[$i]}"
-                if [[ "$pass" == 1 && "$a_type" == "2-arrow" ]]; then continue; fi
-                if [[ "$pass" == 2 && "$a_type" == "arrow" ]]; then continue; fi
-                local a_name="${arrows_name[$i]}"
-                local src="${arrows_src[$i]}" tgt="${arrows_tgt[$i]}"
-                local s_str="${arrows_style[$i]}"
-                local l_style="${s_str%%:*}"; s_str="${s_str#*:}"
-                local a_format="${s_str%%:*}"; s_str="${s_str#*:}"
-                local a_angle="${s_str%%:*}"; s_str="${s_str#*:}"
-                local a_color="${s_str%%:*}"; s_str="${s_str#*:}"
-                local a_label_pos="${s_str%%:*}"; s_str="${s_str#*:}"
-                local a_size="${s_str%%:*}"; s_str="${s_str#*:}"
-                local a_class="${s_str%%:*}"; local a_label="${s_str#*:}"
 
-                local src_coords="${terms[$src]:-}" tgt_coords="${terms[$tgt]:-}"
-                if [[ -n "$src_coords" && -n "$tgt_coords" ]]; then
-                    local sx=${src_coords%,*} sy=${src_coords#*,}
-                    local tx=${tgt_coords%,*} ty=${tgt_coords#*,}
-                    local hw_s=$(( nodes_w[$src] / 2 ))
-                    local hh_s=$(( nodes_h[$src] / 2 ))
-                    local hw_t=$(( nodes_w[$tgt] / 2 ))
-                    local hh_t=$(( nodes_h[$tgt] / 2 ))
-                    local d_path="" d_path_text=""
-                    local path_id="arrow-path-${i}"
-                    local marker_id="arrow-marker-${i}"
-                    local path_class_attr=" class=\"diagram-path${a_class:+ $a_class}\""
-                    local path_color_attr=""
-                    local marker_fill_attr=" class=\"diagram-marker${a_class:+ $a_class}\""
-                    local label_class_attr=" class=\"diagram-text${a_class:+ $a_class}\""
-                    local label_color_attr=""
-                    if [[ -n "$a_color" && "$a_color" != "currentColor" ]]; then
-                        path_class_attr="${a_class:+ class=\"$a_class\"}"
-                        path_color_attr=" stroke=\"${a_color}\""
-                        marker_fill_attr="${a_class:+ class=\"$a_class\"} fill=\"${a_color}\""
-                        label_class_attr="${a_class:+ class=\"$a_class\"}"
-                        label_color_attr=" fill=\"${a_color}\""
-                    fi
-                    if [[ "$a_type" == "2-arrow" ]]; then
-                        local m_stroke_attr=" class=\"diagram-path${a_class:+ $a_class}\""
-                        [[ -n "$a_color" && "$a_color" != "currentColor" ]] && m_stroke_attr="${a_class:+ class=\"$a_class\"} stroke=\"${a_color}\""
-                        defs_html+="<marker id=\"$marker_id\" viewBox=\"0 0 10 10\" refX=\"6\" refY=\"5\" markerWidth=\"8\" markerHeight=\"8\" orient=\"auto-start-reverse\"><path d=\"M 0 1 L 7 5 L 0 9\" fill=\"none\"${m_stroke_attr} stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></marker>"
-                    else
-                        defs_html+="<marker id=\"$marker_id\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" markerWidth=\"7\" markerHeight=\"7\" orient=\"auto-start-reverse\"><path d=\"M 0 0 L 10 5 L 0 10 z\"${marker_fill_attr}/></marker>"
-                    fi
-                    local mx=0 my=0 L=1 dx=0 dy=0 nsx=0 nsy=0 ntx=0 nty=0
-                    if [[ "$src" == "$tgt" ]]; then
-                        d_path="M $sx $((sy - hh_s)) C $((sx - 30)) $((sy - hh_s - 42)), $((sx + 30)) $((sy - hh_s - 42)), $((sx + 10)) $((sy - hh_s - 2))"
-                        d_path_text="$d_path"
-                        mx=$(( sx + 1 ))
-                        my=$(( sy - hh_s - 31 ))
-                    else
-                        local size_int=100
-                        if [[ "$a_size" == *.* ]]; then
-                            local int_part="${a_size%%.*}"
-                            local frac_part="${a_size#*.}00"
-                            size_int=$(( 10#${int_part:-0} * 100 + 10#${frac_part:0:2} ))
-                        elif [[ -n "$a_size" ]]; then
-                            size_int=$(( 10#$a_size * 100 ))
-                        fi
-                        dx=$((tx - sx))
-                        dy=$((ty - sy))
-                        local sign_dx=0 sign_dy=0
-                        (( dx < 0 )) && sign_dx=-1 || { (( dx > 0 )) && sign_dx=1; }
-                        (( dy < 0 )) && sign_dy=-1 || { (( dy > 0 )) && sign_dy=1; }
+                local label_html="" has_tex=0 label_w=0 label_h=0
+                if [[ -n "$a_label" ]]; then
+                    __diagram_render_tex "$a_label"
+                    label_html="$REPLY_HTML"
+                    has_tex="$REPLY_HAS_TEX"
+                    local tex_w="$REPLY_W_TEX"
 
-                        if [[ "$a_format" != "normal" ]]; then
-                            local cx cy
-                            if [[ "$a_format" == "curly" ]]; then
-                                cx=$(( (sx + tx)/2 - (dy * a_angle) / 100 ))
-                                cy=$(( (sy + ty)/2 + (dx * a_angle) / 100 ))
-                            else
-                                cx=$(( (sx + tx)/2 ))
-                                cy=$(( (sy + ty)/2 ))
-                            fi
-                            local dx_s=$(( cx - sx ))
-                            local dy_s=$(( cy - sy ))
-                            local n_s=$(( dx_s*dx_s + dy_s*dy_s ))
-                            local L_s=1
-                            if (( n_s > 0 )); then
-                                local x_val=$n_s y_val=1
-                                while (( x_val > y_val )); do
-                                    x_val=$(( (x_val + y_val) / 2 ))
-                                    y_val=$(( n_s / x_val ))
-                                done
-                                L_s=$x_val
-                            fi
-                            (( L_s == 0 )) && L_s=1
-                            local dx_t=$(( tx - cx ))
-                            local dy_t=$(( ty - cy ))
-                            local n_t=$(( dx_t*dx_t + dy_t*dy_t ))
-                            local L_t=1
-                            if (( n_t > 0 )); then
-                                local x_val=$n_t y_val=1
-                                while (( x_val > y_val )); do
-                                    x_val=$(( (x_val + y_val) / 2 ))
-                                    y_val=$(( n_t / x_val ))
-                                done
-                                L_t=$x_val
-                            fi
-                            (( L_t == 0 )) && L_t=1
-                            local dist_s=0 dist_t=0
-                            local abs_dx_s=${dx_s#-}; local abs_dy_s=${dy_s#-}
-                            if (( abs_dx_s != 0 || abs_dy_s != 0 )); then
-                                if (( abs_dx_s * hh_s > abs_dy_s * hw_s )); then
-                                    (( abs_dx_s == 0 )) && abs_dx_s=1
-                                    dist_s=$(( hw_s * L_s / abs_dx_s ))
-                                else
-                                    (( abs_dy_s == 0 )) && abs_dy_s=1
-                                    dist_s=$(( hh_s * L_s / abs_dy_s ))
-                                fi
-                            fi
-                            local abs_dx_t=${dx_t#-}; local abs_dy_t=${dy_t#-}
-                            if (( abs_dx_t != 0 || abs_dy_t != 0 )); then
-                                if (( abs_dx_t * hh_t > abs_dy_t * hw_t )); then
-                                    (( abs_dx_t == 0 )) && abs_dx_t=1
-                                    dist_t=$(( hw_t * L_t / abs_dx_t ))
-                                else
-                                    (( abs_dy_t == 0 )) && abs_dy_t=1
-                                    dist_t=$(( hh_t * L_t / abs_dy_t ))
-                                fi
-                            fi
-                            local padding_s=$(( L_s * (100 - size_int) / 200 ))
-                            local padding_t=$(( L_t * (100 - size_int) / 200 ))
-                            local gap_s=$(( dist_s + padding_s ))
-                            local gap_t=$(( dist_t + padding_t ))
-
-                            local max_gap_s=$(( L_s - 2 ))
-                            local max_gap_t=$(( L_t - 2 ))
-                            (( gap_s > max_gap_s )) && gap_s=$max_gap_s
-                            (( gap_t > max_gap_t )) && gap_t=$max_gap_t
-                            nsx=$(( sx + dx_s * gap_s / L_s ))
-                            nsy=$(( sy + dy_s * gap_s / L_s ))
-                            ntx=$(( tx - dx_t * gap_t / L_t ))
-                            nty=$(( ty - dy_t * gap_t / L_t ))
-                            if [[ "$a_format" == "curly" ]]; then
-                                d_path="M $nsx $nsy Q $cx $cy $ntx $nty"
-                                d_path_text="M $ntx $nty Q $cx $cy $nsx $nsy"
-                                mx=$(( (nsx + ntx + cx * 2) / 4 ))
-                                my=$(( (nsy + nty + cy * 2) / 4 ))
-                            else
-                                d_path="M $nsx $nsy L $ntx $nty"
-                                d_path_text="M $ntx $nty L $nsx $nsy"
-                                mx=$(( (nsx + ntx)/2 ))
-                                my=$(( (nsy + nty)/2 ))
-                            fi
-                        else
-                            if (( sy == ty )); then
-                                local esx=$(( sx + sign_dx * hw_s ))
-                                local etx=$(( tx - sign_dx * hw_t ))
-                                local L_orth=$(( etx - esx )); L_orth=${L_orth#-}
-                                local gap=$(( L_orth * (100 - size_int) / 200 ))
-                                nsx=$(( esx + sign_dx * gap ))
-                                ntx=$(( etx - sign_dx * gap ))
-                                nsy=$sy nty=$ty
-                                d_path="M $nsx $sy L $ntx $ty"
-                                d_path_text="M $ntx $ty L $nsx $sy"
-                            elif (( sx == tx )); then
-                                local esy=$(( sy + sign_dy * hh_s ))
-                                local ety=$(( ty - sign_dy * hh_t ))
-                                local L_orth=$(( ety - esy )); L_orth=${L_orth#-}
-                                local gap=$(( L_orth * (100 - size_int) / 200 ))
-                                nsy=$(( esy + sign_dy * gap ))
-                                nty=$(( ety - sign_dy * gap ))
-                                nsx=$sx ntx=$tx
-                                d_path="M $sx $nsy L $tx $nty"
-                                d_path_text="M $tx $nty L $sx $nsy"
-                            else
-                                local esx=$(( sx + sign_dx * hw_s ))
-                                local ety=$(( ty - sign_dy * hh_t ))
-                                local abs_tx_esx=$(( tx - esx )); abs_tx_esx=${abs_tx_esx#-}
-                                local abs_ety_sy=$(( ety - sy )); abs_ety_sy=${abs_ety_sy#-}
-                                local L_orth=$(( abs_tx_esx + abs_ety_sy ))
-                                local gap=$(( L_orth * (100 - size_int) / 200 ))
-                                if (( gap <= abs_tx_esx )); then nsx=$(( esx + sign_dx * gap )); nsy=$sy
-                                else nsx=$tx; nsy=$(( sy + sign_dy * (gap - abs_tx_esx) )); fi
-                                if (( gap <= abs_ety_sy )); then ntx=$tx; nty=$(( ety - sign_dy * gap ))
-                                else ntx=$(( tx - sign_dx * (gap - abs_ety_sy) )); nty=$sy; fi
-                                if (( nsy == sy && ntx == tx )); then
-                                    d_path="M $nsx $nsy L $tx $sy L $ntx $nty"
-                                    d_path_text="M $ntx $nty L $tx $sy L $nsx $nsy"
-                                elif (( nsy != sy && ntx == tx )) || (( nsy == sy && ntx != tx )); then
-                                    d_path="M $nsx $nsy L $ntx $nty"
-                                    d_path_text="M $ntx $nty L $nsx $nsy"
-                                else
-                                    d_path="M $nsx $nsy L $tx $sy L $ntx $nty"
-                                    d_path_text="M $ntx $nty L $tx $sy L $nsx $nsy"
-                                fi
-                            fi
-                            mx=$(( (nsx + ntx)/2 ))
-                            my=$(( (nsy + nty)/2 ))
-                        fi
-                        (( nsx <= ntx )) && d_path_text="$d_path"
-                    fi
-                    terms["$a_name"]="${mx},${my}"
-                    nodes_w["$a_name"]=0
-                    nodes_h["$a_name"]=0
-                    local path_props=""
-                    if [[ "$l_style" == "dashed" ]]; then path_props+=" stroke-dasharray=\"6,6\""
-                    elif [[ "$l_style" == "dotted" ]]; then path_props+=" stroke-dasharray=\"0,7\" stroke-linecap=\"round\""
-                    elif [[ "$l_style" == "wavy" ]]; then path_props+=" filter=\"url(#wavy)\""
-                    fi
-                    layer_arrows+="<path id=\"${path_id}-text\" d=\"$d_path_text\" fill=\"none\" stroke=\"none\" />"$'\n'
-                    if [[ "$a_type" == "2-arrow" ]]; then
-                        layer_arrows+="<path id=\"$path_id\" d=\"$d_path\" fill=\"none\"${path_class_attr}${path_color_attr} stroke-width=\"3\"${path_props} />"$'\n'
-                        layer_arrows+="<path d=\"$d_path\" fill=\"none\" class=\"diagram-bg-stroke\" stroke-width=\"1.5\"${path_props} />"$'\n'
+                    local -a lbl_lines=()
+                    if [[ "$a_label" == *"\\n"* ]]; then
+                        local split_tmp="${a_label//\\n/$'\x02'}"
+                        set -f; IFS=$'\x02'; lbl_lines=($split_tmp); IFS="$old_ifs"; set +f
                     else
-                        layer_arrows+="<path id=\"$path_id\" d=\"$d_path\" fill=\"none\"${path_class_attr}${path_color_attr} stroke-width=\"1.5\"${path_props} />"$'\n'
+                        lbl_lines=("$a_label")
                     fi
-                    layer_arrows+="<path d=\"$d_path\" fill=\"none\" stroke=\"none\" marker-end=\"url(#${marker_id})\" />"$'\n'
-                    if [[ -n "$a_label" ]]; then
-                        local dy_offset="-5"
-                        [[ "$a_label_pos" == "below" ]] && dy_offset="15"
-                        layer_arrows+="<text dy=\"$dy_offset\" text-anchor=\"middle\"${label_class_attr}${label_color_attr}><textPath href=\"#${path_id}-text\" startOffset=\"50%\">${a_label}</textPath></text>"$'\n'
-                    fi
+                    local max_lbl_len=0 l_str
+                    for l_str in "${lbl_lines[@]}"; do
+                        local no_tex="${l_str//\$*\$/}"
+                        __char_len "$no_tex"
+                        (( REPLY > max_lbl_len )) && max_lbl_len=$REPLY
+                    done
+                    local lbl_line_count=${#lbl_lines[@]}
+                    (( lbl_line_count == 0 )) && lbl_line_count=1
+                    label_w=$(( max_lbl_len * 9 + tex_w + 16 ))
+                    label_h=$(( lbl_line_count * 18 ))
+                    (( has_tex == 1 && label_h < 28 )) && label_h=28
                 fi
-            done
-        done
-        for term in "${!terms[@]}"; do
-            [[ "${nodes_w[$term]}" == "0" ]] && continue
-            local coords="${terms[$term]}"
-            local tx=${coords%,*} ty=${coords#*,}
-            local border="${nodes_border[$term]:-rounded}"
-            local bg="${nodes_bg[$term]:-default}"
-            local n_class="${nodes_class[$term]:-}"
-            local box_w=${nodes_w[$term]}
-            local box_h=${nodes_h[$term]}
-            local box_x=$(( tx - box_w / 2 ))
-            local box_y=$(( ty - box_h / 2 ))
-            local rx=18
-            [[ "$border" == "squared" ]] && rx=4
-            [[ "$border" == "none" || -z "$border" ]] && rx=0
-            local inline_style=""
-            if [[ "$bg" == "none" ]]; then inline_style+="fill: none; "
-            elif [[ "$bg" != "default" ]]; then inline_style+="fill: ${bg}; "
+
+                arrow_lines+=("ARROW"$'\x1f'"$a_type"$'\x1f'"$a_name"$'\x1f'"$src"$'\x1f'"$tgt"$'\x1f'"$has_coords"$'\x1f'"$a_x"$'\x1f'"$a_y"$'\x1f'"$a_format"$'\x1f'"$l_style"$'\x1f'"$a_angle"$'\x1f'"$a_color"$'\x1f'"$a_size"$'\x1f'"$a_class"$'\x1f'"$a_label_pos"$'\x1f'"$has_tex"$'\x1f'"$a_label"$'\x1f'"$label_html"$'\x1f'"$label_w"$'\x1f'"$label_h")
             fi
-            [[ "$border" == "none" || -z "$border" ]] && inline_style+="stroke: none; "
-            local style_attr=""
-            [[ -n "$inline_style" ]] && style_attr=" style=\"${inline_style}\""
-            layer_nodes+="<rect x=\"$box_x\" y=\"$box_y\" width=\"$box_w\" height=\"$box_h\" rx=\"$rx\" class=\"diagram-node${n_class:+ $n_class}\" stroke-width=\"1.5\"${style_attr} />"$'\n'
-            layer_nodes+="<text x=\"$tx\" y=\"$ty\" text-anchor=\"middle\" dominant-baseline=\"central\" class=\"diagram-text${n_class:+ $n_class}\">${node_tspans[$term]}</text>"$'\n'
         done
+
+        if (( ${#node_lines[@]} == 0 )); then return; fi
+
         ((page_diagram_count++))
         local diagram_id="diagram-${page_diagram_count}"
-        content+="<div id=\"${diagram_id}\" class=\"diagram-container\" style=\"overflow-x: auto; padding: 1rem;\">
-<svg width=\"${svg_w}\" height=\"${svg_h}\" viewBox=\"0 0 ${svg_w} ${svg_h}\" xmlns=\"http://www.w3.org/2000/svg\" style=\"max-width: none;\">
-<style>
-            .diagram-node { fill: var(--bg-code, #ffffff); stroke: var(--gray4, #333333); }
-            .diagram-text, .diagram-text * { fill: var(--fg, #333333); font-family: var(--family-diagram, monospace) !important; font-size: 14px; }
-            .diagram-path { stroke: var(--gray4, #333333); }
-            .diagram-bg-stroke { stroke: var(--bg, #ffffff); }
-            .diagram-marker { fill: var(--gray4, #333333); }
-            svg text, svg textPath, svg tspan { font-family: var(--family-diagram, monospace) !important; font-size: 14px !important; }
-        </style>
-${defs_html}
-${layer_arrows}
-${layer_nodes}
-</svg>
-</div>"$'\n'
+
+        local diagram_svg
+        diagram_svg=$(awk -F'\x1F' -v diagram_id="$diagram_id" '
+        function abs(v) { return v < 0 ? -v : v }
+        function min(a, b) { return a < b ? a : b }
+        function max(a, b) { return a > b ? a : b }
+
+        BEGIN {
+            node_count = 0
+            arrow_count = 0
+            min_x = 999999; max_x = -999999
+            min_y = 999999; max_y = -999999
+            max_node_w = 80; max_node_h = 36
+        }
+        $1 == "NODE" {
+            node_count++
+            name = $2
+            node_name[node_count] = name
+            node_idx[name] = node_count
+            x = $3 + 0; y = $4 + 0
+            node_x[node_count] = x
+            node_y[node_count] = y
+            w = $5 + 0; h = $6 + 0
+            node_w[node_count] = w
+            node_h[node_count] = h
+            node_border[node_count] = $7
+            node_bg[node_count] = $8
+            node_class[node_count] = $9
+            node_has_tex[node_count] = $10 + 0
+            node_raw[node_count] = $11
+            node_html[node_count] = $12
+
+            min_x = min(min_x, x); max_x = max(max_x, x)
+            min_y = min(min_y, y); max_y = max(max_y, y)
+            max_node_w = max(max_node_w, w)
+            max_node_h = max(max_node_h, h)
+            unique_x[x] = 1
+            unique_y[y] = 1
+        }
+        $1 == "ARROW" {
+            arrow_count++
+            arr_type[arrow_count] = $2
+            arr_name[arrow_count] = $3
+            arr_src[arrow_count] = $4
+            arr_tgt[arrow_count] = $5
+            has_c = $6 + 0
+            arr_has_coords[arrow_count] = has_c
+            ax = $7 + 0; ay = $8 + 0
+            arr_x[arrow_count] = ax
+            arr_y[arrow_count] = ay
+            arr_format[arrow_count] = $9
+            arr_style[arrow_count] = $10
+            arr_angle[arrow_count] = $11 + 0
+            arr_color[arrow_count] = $12
+            arr_size[arrow_count] = $13 + 0
+            arr_class[arrow_count] = $14
+            arr_label_pos[arrow_count] = $15
+            arr_has_tex[arrow_count] = $16 + 0
+            arr_label_raw[arrow_count] = $17
+            arr_label_html[arrow_count] = $18
+            arr_label_w[arrow_count] = $19 + 0
+            arr_label_h[arrow_count] = $20 + 0
+
+            if (has_c) {
+                min_x = min(min_x, ax); max_x = max(max_x, ax)
+                min_y = min(min_y, ay); max_y = max(max_y, ay)
+                unique_x[ax] = 1
+                unique_y[ay] = 1
+            }
+        }
+        END {
+            if (node_count == 0) exit 0
+
+            # Compute minimum delta x and y
+            n_ux = 0; for (ux in unique_x) { n_ux++; ux_arr[n_ux] = ux + 0 }
+            n_uy = 0; for (uy in unique_y) { n_uy++; uy_arr[n_uy] = uy + 0 }
+
+            for (i = 1; i <= n_ux; i++) {
+                for (j = i + 1; j <= n_ux; j++) {
+                    if (ux_arr[i] > ux_arr[j]) { t = ux_arr[i]; ux_arr[i] = ux_arr[j]; ux_arr[j] = t }
+                }
+            }
+            for (i = 1; i <= n_uy; i++) {
+                for (j = i + 1; j <= n_uy; j++) {
+                    if (uy_arr[i] > uy_arr[j]) { t = uy_arr[i]; uy_arr[i] = uy_arr[j]; uy_arr[j] = t }
+                }
+            }
+
+            min_dx = 1
+            if (n_ux > 1) {
+                min_dx = 999999
+                for (i = 1; i < n_ux; i++) {
+                    d = ux_arr[i+1] - ux_arr[i]
+                    if (d > 0.00001 && d < min_dx) min_dx = d
+                }
+                if (min_dx == 999999) min_dx = 1
+            }
+            min_dy = 1
+            if (n_uy > 1) {
+                min_dy = 999999
+                for (i = 1; i < n_uy; i++) {
+                    d = uy_arr[i+1] - uy_arr[i]
+                    if (d > 0.00001 && d < min_dy) min_dy = d
+                }
+                if (min_dy == 999999) min_dy = 1
+            }
+
+            target_dist_x = max_node_w + 50
+            if (target_dist_x < 140) target_dist_x = 140
+            target_dist_y = max_node_h + 40
+            if (target_dist_y < 80) target_dist_y = 80
+
+            scale_x = (min_dx < 1 ? target_dist_x / min_dx : target_dist_x)
+            scale_y = (min_dy < 1 ? target_dist_y / min_dy : target_dist_y)
+
+            padding_x = max_node_w / 2 + 16
+            padding_y = max_node_h / 2 + 16
+
+            bound_min_x = 999999; bound_max_x = -999999
+            bound_min_y = 999999; bound_max_y = -999999
+
+            # Screen coordinates for nodes
+            for (i = 1; i <= node_count; i++) {
+                px = (node_x[i] - min_x) * scale_x + padding_x
+                py = (max_y - node_y[i]) * scale_y + padding_y
+                nm = node_name[i]
+                terms_x[nm] = px
+                terms_y[nm] = py
+                terms_w[nm] = node_w[i]
+                terms_h[nm] = node_h[i]
+
+                bound_min_x = min(bound_min_x, px - node_w[i] / 2)
+                bound_max_x = max(bound_max_x, px + node_w[i] / 2)
+                bound_min_y = min(bound_min_y, py - node_h[i] / 2)
+                bound_max_y = max(bound_max_y, py + node_h[i] / 2)
+            }
+
+            # Defs
+            defs_html = "<defs>\n" \
+                "    <filter id=\"wavy\" filterUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"100%\" height=\"100%\">\n" \
+                "        <feTurbulence type=\"fractalNoise\" baseFrequency=\"0.05\" numOctaves=\"1\" result=\"noise\"/>\n" \
+                "        <feDisplacementMap in=\"SourceGraphic\" in2=\"noise\" scale=\"5\" xChannelSelector=\"R\" yChannelSelector=\"G\"/>\n" \
+                "    </filter>\n" \
+                "</defs>"
+
+            layer_arrows = ""
+            layer_labels = ""
+
+            # Multi-pass arrow layout
+            for (pass = 1; pass <= 2; pass++) {
+                for (i = 1; i <= arrow_count; i++) {
+                    atype = arr_type[i]
+                    if (pass == 1 && atype == "2-arrow") continue
+                    if (pass == 2 && atype == "arrow") continue
+
+                    aname = arr_name[i]
+                    src = arr_src[i]
+                    tgt = arr_tgt[i]
+                    has_c = arr_has_coords[i]
+
+                    has_src = (src in terms_x)
+                    has_tgt = (tgt in terms_x)
+
+                    if (!has_src && has_c) {
+                        sx = (arr_x[i] - min_x) * scale_x + padding_x
+                        sy = (max_y - arr_y[i]) * scale_y + padding_y
+                        hw_s = 0; hh_s = 0
+                        has_src = 1
+                    } else if (has_src) {
+                        sx = terms_x[src]; sy = terms_y[src]
+                        hw_s = terms_w[src] / 2; hh_s = terms_h[src] / 2
+                    }
+
+                    if (!has_tgt && has_c) {
+                        tx = (arr_x[i] - min_x) * scale_x + padding_x
+                        ty = (max_y - arr_y[i]) * scale_y + padding_y
+                        hw_t = 0; hh_t = 0
+                        has_tgt = 1
+                    } else if (has_tgt) {
+                        tx = terms_x[tgt]; ty = terms_y[tgt]
+                        hw_t = terms_w[tgt] / 2; hh_t = terms_h[tgt] / 2
+                    }
+
+                    if (!has_src || !has_tgt) {
+                        if (has_c) {
+                            apx = (arr_x[i] - min_x) * scale_x + padding_x
+                            apy = (max_y - arr_y[i]) * scale_y + padding_y
+                            terms_x[aname] = apx; terms_y[aname] = apy
+                            terms_w[aname] = 0; terms_h[aname] = 0
+                        }
+                        continue
+                    }
+
+                    a_format = arr_format[i]
+                    l_style = arr_style[i]
+                    a_angle = arr_angle[i]
+                    a_color = arr_color[i]
+                    a_size = arr_size[i]
+                    a_class = arr_class[i]
+                    a_label_pos = arr_label_pos[i]
+                    has_tex = arr_has_tex[i]
+                    label_raw = arr_label_raw[i]
+                    label_html = arr_label_html[i]
+
+                    path_id = "arrow-path-" (i - 1)
+                    marker_id = "arrow-marker-" (i - 1)
+                    path_class_attr = " class=\"diagram-path" (a_class != "" ? " " a_class : "") "\""
+                    path_color_attr = ""
+                    marker_fill_attr = " class=\"diagram-marker" (a_class != "" ? " " a_class : "") "\""
+                    label_class_attr = " class=\"diagram-text diagram-label" (a_class != "" ? " " a_class : "") "\""
+                    label_color_attr = ""
+
+                    if (a_color != "" && a_color != "currentColor") {
+                        path_class_attr = (a_class != "" ? " class=\"" a_class "\"" : "")
+                        path_color_attr = " stroke=\"" a_color "\""
+                        marker_fill_attr = (a_class != "" ? " class=\"" a_class "\"" : "") " fill=\"" a_color "\""
+                        label_color_attr = " fill=\"" a_color "\""
+                    }
+
+                    if (atype == "2-arrow") {
+                        m_stroke = " class=\"diagram-path" (a_class != "" ? " " a_class : "") "\""
+                        if (a_color != "" && a_color != "currentColor") m_stroke = (a_class != "" ? " class=\"" a_class "\"" : "") " stroke=\"" a_color "\""
+                        defs_html = defs_html "<marker id=\"" marker_id "\" viewBox=\"0 0 10 10\" refX=\"6\" refY=\"5\" markerWidth=\"8\" markerHeight=\"8\" orient=\"auto-start-reverse\"><path d=\"M 0 1 L 7 5 L 0 9\" fill=\"none\"" m_stroke " stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></marker>\n"
+                    } else {
+                        defs_html = defs_html "<marker id=\"" marker_id "\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" markerWidth=\"7\" markerHeight=\"7\" orient=\"auto-start-reverse\"><path d=\"M 0 0 L 10 5 L 0 10 z\"" marker_fill_attr "/></marker>\n"
+                    }
+
+                    d_path = ""
+                    mx = 0; my = 0
+                    tan_x = 0; tan_y = 0
+
+                    if (src == tgt) {
+                        d_path = sprintf("M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f", sx, sy - hh_s, sx - 30, sy - hh_s - 42, sx + 30, sy - hh_s - 42, sx + 10, sy - hh_s - 2)
+                        mx = sx + 1
+                        my = sy - hh_s - 38
+                        tan_x = 1; tan_y = 0
+                        bound_min_x = min(bound_min_x, sx - 30)
+                        bound_max_x = max(bound_max_x, sx + 30)
+                        bound_min_y = min(bound_min_y, sy - hh_s - 42)
+                    } else {
+                        dx = tx - sx; dy = ty - sy
+                        sign_dx = (dx < 0 ? -1 : (dx > 0 ? 1 : 0))
+                        sign_dy = (dy < 0 ? -1 : (dy > 0 ? 1 : 0))
+
+                        if (has_c) {
+                            cx = (arr_x[i] - min_x) * scale_x + padding_x
+                            cy = (max_y - arr_y[i]) * scale_y + padding_y
+                        } else if (a_format == "curly") {
+                            cx = (sx + tx)/2 - (dy * a_angle) / 100
+                            cy = (sy + ty)/2 + (dx * a_angle) / 100
+                        } else {
+                            cx = (sx + tx)/2
+                            cy = (sy + ty)/2
+                        }
+
+                        if (a_format != "normal" || has_c) {
+                            dx_s = cx - sx; dy_s = cy - sy
+                            L_s = sqrt(dx_s*dx_s + dy_s*dy_s); if (L_s == 0) L_s = 1
+                            dx_t = tx - cx; dy_t = ty - cy
+                            L_t = sqrt(dx_t*dx_t + dy_t*dy_t); if (L_t == 0) L_t = 1
+
+                            abs_dx_s = abs(dx_s); abs_dy_s = abs(dy_s)
+                            dist_s = 0
+                            if (abs_dx_s > 0 || abs_dy_s > 0) {
+                                if (abs_dx_s * hh_s > abs_dy_s * hw_s) dist_s = (abs_dx_s > 0 ? hw_s * L_s / abs_dx_s : 0)
+                                else dist_s = (abs_dy_s > 0 ? hh_s * L_s / abs_dy_s : 0)
+                            }
+
+                            abs_dx_t = abs(dx_t); abs_dy_t = abs(dy_t)
+                            dist_t = 0
+                            if (abs_dx_t > 0 || abs_dy_t > 0) {
+                                if (abs_dx_t * hh_t > abs_dy_t * hw_t) dist_t = (abs_dx_t > 0 ? hw_t * L_t / abs_dx_t : 0)
+                                else dist_t = (abs_dy_t > 0 ? hh_t * L_t / abs_dy_t : 0)
+                            }
+
+                            gap_s = dist_s + L_s * (1 - a_size) / 2
+                            gap_t = dist_t + L_t * (1 - a_size) / 2
+                            if (gap_s > L_s - 2) gap_s = L_s - 2
+                            if (gap_t > L_t - 2) gap_t = L_t - 2
+
+                            nsx = sx + dx_s * gap_s / L_s
+                            nsy = sy + dy_s * gap_s / L_s
+                            ntx = tx - dx_t * gap_t / L_t
+                            nty = ty - dy_t * gap_t / L_t
+
+                            if (a_format == "curly" || has_c) {
+                                d_path = sprintf("M %.1f %.1f Q %.1f %.1f %.1f %.1f", nsx, nsy, cx, cy, ntx, nty)
+                                mx = (nsx + 2 * cx + ntx) / 4
+                                my = (nsy + 2 * cy + nty) / 4
+                                tan_x = ntx - nsx; tan_y = nty - nsy
+                                bound_min_x = min(bound_min_x, mx)
+                                bound_max_x = max(bound_max_x, mx)
+                                bound_min_y = min(bound_min_y, my)
+                                bound_max_y = max(bound_max_y, my)
+                            } else {
+                                d_path = sprintf("M %.1f %.1f L %.1f %.1f", nsx, nsy, ntx, nty)
+                                mx = (nsx + ntx)/2
+                                my = (nsy + nty)/2
+                                tan_x = ntx - nsx; tan_y = nty - nsy
+                            }
+                        } else {
+                            if (sy == ty) {
+                                esx = sx + sign_dx * hw_s
+                                etx = tx - sign_dx * hw_t
+                                L_orth = abs(etx - esx)
+                                gap = L_orth * (1 - a_size) / 2
+                                nsx = esx + sign_dx * gap
+                                ntx = etx - sign_dx * gap
+                                nsy = sy; nty = ty
+                                d_path = sprintf("M %.1f %.1f L %.1f %.1f", nsx, sy, ntx, ty)
+                                tan_x = ntx - nsx; tan_y = 0
+                            } else if (sx == tx) {
+                                esy = sy + sign_dy * hh_s
+                                ety = ty - sign_dy * hh_t
+                                L_orth = abs(ety - esy)
+                                gap = L_orth * (1 - a_size) / 2
+                                nsy = esy + sign_dy * gap
+                                nty = ety - sign_dy * gap
+                                nsx = sx; ntx = tx
+                                d_path = sprintf("M %.1f %.1f L %.1f %.1f", sx, nsy, tx, nty)
+                                tan_x = 0; tan_y = nty - nsy
+                            } else {
+                                esx = sx + sign_dx * hw_s
+                                ety = ty - sign_dy * hh_t
+                                abs_tx_esx = abs(tx - esx)
+                                abs_ety_sy = abs(ety - sy)
+                                L_orth = abs_tx_esx + abs_ety_sy
+                                gap = L_orth * (1 - a_size) / 2
+                                if (gap <= abs_tx_esx) { nsx = esx + sign_dx * gap; nsy = sy }
+                                else { nsx = tx; nsy = sy + sign_dy * (gap - abs_tx_esx) }
+                                if (gap <= abs_ety_sy) { ntx = tx; nty = ety - sign_dy * gap }
+                                else { ntx = tx - sign_dx * (gap - abs_ety_sy); nty = sy }
+
+                                if (nsy == sy && ntx == tx) d_path = sprintf("M %.1f %.1f L %.1f %.1f L %.1f %.1f", nsx, nsy, tx, sy, ntx, nty)
+                                else if ((nsy != sy && ntx == tx) || (nsy == sy && ntx != tx)) d_path = sprintf("M %.1f %.1f L %.1f %.1f", nsx, nsy, ntx, nty)
+                                else d_path = sprintf("M %.1f %.1f L %.1f %.1f L %.1f %.1f", nsx, nsy, tx, sy, ntx, nty)
+
+                                tan_x = ntx - nsx; tan_y = nty - nsy
+                            }
+                            mx = (nsx + ntx)/2
+                            my = (nsy + nty)/2
+                        }
+                    }
+
+                    terms_x[aname] = mx; terms_y[aname] = my
+                    terms_w[aname] = 0; terms_h[aname] = 0
+
+                    path_props = ""
+                    if (l_style == "dashed") path_props = " stroke-dasharray=\"6,6\""
+                    else if (l_style == "dotted") path_props = " stroke-dasharray=\"0,7\" stroke-linecap=\"round\""
+                    else if (l_style == "wavy") path_props = " filter=\"url(#wavy)\""
+
+                    if (atype == "2-arrow") {
+                        layer_arrows = layer_arrows "<path id=\"" path_id "\" d=\"" d_path "\" fill=\"none\"" path_class_attr path_color_attr " stroke-width=\"3\"" path_props " />\n"
+                        layer_arrows = layer_arrows "<path d=\"" d_path "\" fill=\"none\" class=\"diagram-bg-stroke\" stroke-width=\"1.5\"" path_props " />\n"
+                    } else {
+                        layer_arrows = layer_arrows "<path id=\"" path_id "\" d=\"" d_path "\" fill=\"none\"" path_class_attr path_color_attr " stroke-width=\"1.5\"" path_props " />\n"
+                    }
+                    layer_arrows = layer_arrows "<path d=\"" d_path "\" fill=\"none\" stroke=\"none\" marker-end=\"url(#" marker_id ")\" />\n"
+
+                    if (label_raw != "") {
+                        tan_len = sqrt(tan_x * tan_x + tan_y * tan_y)
+                        if (tan_len == 0) tan_len = 1
+                        ux = tan_x / tan_len; uy = tan_y / tan_len
+                        nx = -uy; ny = ux
+                        if (ny > 0 || (ny == 0 && nx > 0)) { nx = -nx; ny = -ny }
+                        dist_lbl = 16
+                        if (a_label_pos == "below") { lx = mx - dist_lbl * nx; ly = my - dist_lbl * ny }
+                        else { lx = mx + dist_lbl * nx; ly = my + dist_lbl * ny }
+
+                        txt_anchor = "middle"
+                        if (abs(ny) < 0.5) {
+                            if (lx > mx) { txt_anchor = "start"; lx = mx + 10 }
+                            else { txt_anchor = "end"; lx = mx - 10 }
+                        }
+
+                        lbl_w = max(arr_label_w[i], 40)
+                        lbl_h = max(arr_label_h[i], 20)
+                        if (txt_anchor == "start") {
+                            lbl_x1 = lx
+                            lbl_x2 = lx + lbl_w
+                        } else if (txt_anchor == "end") {
+                            lbl_x1 = lx - lbl_w
+                            lbl_x2 = lx
+                        } else {
+                            lbl_x1 = lx - lbl_w / 2
+                            lbl_x2 = lx + lbl_w / 2
+                        }
+                        lbl_y1 = ly - lbl_h / 2
+                        lbl_y2 = ly + lbl_h / 2
+
+                        bound_min_x = min(bound_min_x, lbl_x1)
+                        bound_max_x = max(bound_max_x, lbl_x2)
+                        bound_min_y = min(bound_min_y, lbl_y1)
+                        bound_max_y = max(bound_max_y, lbl_y2)
+
+                        if (has_tex) {
+                            gsub(/\\n/, "<br/>", label_html)
+                            lbl_x = lbl_x1
+                            lbl_y = lbl_y1
+                            layer_labels = layer_labels "<foreignObject x=\"" lbl_x "\" y=\"" lbl_y "\" width=\"" lbl_w "\" height=\"" lbl_h "\" style=\"overflow: visible;\"><div xmlns=\"http://www.w3.org/1999/xhtml\" style=\"display: inline-flex; flex-direction: column; align-items: " (txt_anchor == "start" ? "flex-start" : (txt_anchor == "end" ? "flex-end" : "center")) "; justify-content: center; text-align: " (txt_anchor == "start" ? "left" : (txt_anchor == "end" ? "right" : "center")) "; background: var(--bg-code, #ffffff); border-radius: 3px; padding: 1px 4px; font-family: var(--family-diagram, monospace); font-size: 14px; pointer-events: none;\">" label_html "</div></foreignObject>\n"
+                        } else {
+                            n_lines = split(label_raw, l_arr, "\\\\n")
+                            if (n_lines <= 1) {
+                                layer_labels = layer_labels "<text x=\"" lx "\" y=\"" ly "\" text-anchor=\"" txt_anchor "\" dominant-baseline=\"central\"" label_class_attr label_color_attr ">" label_raw "</text>\n"
+                            } else {
+                                line_height = 18
+                                start_dy = - (n_lines - 1) * line_height / 2
+                                tspans = ""
+                                for (l = 1; l <= n_lines; l++) {
+                                    ldy = (l == 1 ? start_dy : line_height)
+                                    tspans = tspans "<tspan x=\"" lx "\" dy=\"" ldy "\">" l_arr[l] "</tspan>"
+                                }
+                                layer_labels = layer_labels "<text x=\"" lx "\" y=\"" ly "\" text-anchor=\"" txt_anchor "\" dominant-baseline=\"central\"" label_class_attr label_color_attr ">" tspans "</text>\n"
+                            }
+                        }
+                    }
+                }
+            }
+
+            layer_nodes = ""
+            for (i = 1; i <= node_count; i++) {
+                nm = node_name[i]
+                tx = terms_x[nm]; ty = terms_y[nm]
+                w = terms_w[nm]; h = terms_h[nm]
+                bx = tx - w / 2; by = ty - h / 2
+
+                border = node_border[i]
+                bg = node_bg[i]
+                n_class = node_class[i]
+                has_tex = node_has_tex[i]
+                raw_text = node_raw[i]
+                html_text = node_html[i]
+
+                rx = 18
+                if (border == "squared") rx = 4
+                if (border == "none" || border == "") rx = 0
+
+                inline_style = ""
+                if (bg == "none") inline_style = inline_style "fill: none; "
+                else if (bg != "default" && bg != "") inline_style = inline_style "fill: " bg "; "
+
+                if (border == "none" || border == "") inline_style = inline_style "stroke: none; "
+                style_attr = (inline_style != "" ? " style=\"" inline_style "\"" : "")
+
+                layer_nodes = layer_nodes "<rect x=\"" bx "\" y=\"" by "\" width=\"" w "\" height=\"" h "\" rx=\"" rx "\" class=\"diagram-node" (n_class != "" ? " " n_class : "") "\" stroke-width=\"1.5\"" style_attr " />\n"
+
+                if (has_tex) {
+                    gsub(/\\n/, "<br/>", html_text)
+                    layer_nodes = layer_nodes "<foreignObject x=\"" bx "\" y=\"" by "\" width=\"" w "\" height=\"" h "\"><div xmlns=\"http://www.w3.org/1999/xhtml\" style=\"display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%; text-align: center; font-family: var(--family-diagram, monospace); font-size: 14px; pointer-events: none;\">" html_text "</div></foreignObject>\n"
+                } else {
+                    n_lines = split(raw_text, l_arr, "\\\\n")
+                    if (n_lines <= 1) {
+                        layer_nodes = layer_nodes "<text x=\"" tx "\" y=\"" ty "\" text-anchor=\"middle\" dominant-baseline=\"central\" class=\"diagram-text" (n_class != "" ? " " n_class : "") "\"><tspan x=\"" tx "\" dy=\"0\">" raw_text "</tspan></text>\n"
+                    } else {
+                        line_height = 18
+                        start_dy = - (n_lines - 1) * line_height / 2
+                        tspans = ""
+                        for (l = 1; l <= n_lines; l++) {
+                            ldy = (l == 1 ? start_dy : line_height)
+                            tspans = tspans "<tspan x=\"" tx "\" dy=\"" ldy "\">" l_arr[l] "</tspan>"
+                        }
+                        layer_nodes = layer_nodes "<text x=\"" tx "\" y=\"" ty "\" text-anchor=\"middle\" dominant-baseline=\"central\" class=\"diagram-text" (n_class != "" ? " " n_class : "") "\">" tspans "</text>\n"
+                    }
+                }
+            }
+
+            margin = 4
+            bound_min_x -= margin
+            bound_max_x += margin
+            bound_min_y -= margin
+            bound_max_y += margin
+
+            final_w = bound_max_x - bound_min_x
+            final_h = bound_max_y - bound_min_y
+
+            printf "<div id=\"%s\" class=\"diagram-container\" style=\"overflow-x: auto;\">\n", diagram_id
+            printf "<svg width=\"%.0f\" height=\"%.0f\" viewBox=\"%.0f %.0f %.0f %.0f\" xmlns=\"http://www.w3.org/2000/svg\" style=\"max-width: none; display: block;\">\n", final_w, final_h, bound_min_x, bound_min_y, final_w, final_h
+            printf "<style>\n"
+            printf "    .diagram-node { fill: var(--bg-code, #ffffff); stroke: var(--gray4, #333333); }\n"
+            printf "    .diagram-text, .diagram-text * { fill: var(--fg, #333333); font-family: var(--family-diagram, monospace) !important; font-size: 14px; }\n"
+            printf "    .diagram-label, .diagram-label * { paint-order: stroke fill; stroke: var(--bg-code, #ffffff); stroke-width: 4px; stroke-linejoin: round; }\n"
+            printf "    .diagram-path { stroke: var(--gray4, #333333); }\n"
+            printf "    .diagram-bg-stroke { stroke: var(--bg, #ffffff); }\n"
+            printf "    .diagram-marker { fill: var(--gray4, #333333); }\n"
+            printf "    svg text, svg tspan { font-family: var(--family-diagram, monospace) !important; font-size: 14px !important; }\n"
+            printf "    .latex-inline svg { vertical-align: middle; }\n"
+            printf "</style>\n"
+            printf "%s\n", defs_html
+            printf "%s", layer_arrows
+            printf "%s", layer_labels
+            printf "%s", layer_nodes
+            printf "</svg>\n</div>"
+        }
+        ' <<< "$(printf "%s\n" "${node_lines[@]}" "${arrow_lines[@]}")")
+
+        content+="${diagram_svg}"$'\n'
         LIST_HTML_MAP["diagram"]+="<li><a href=\"#${diagram_id}\">Diagram ${page_diagram_count}</a></li>"$'\n'
     }
 
