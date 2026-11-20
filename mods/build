@@ -495,11 +495,11 @@ __build__() {
         force_rebuild=1
         printf "%s\n" "$tmpl_hash" > "$tmpl_cache_file"
         > "$cache_file"
-        rm -f "$meta_cache_file"
+        rm -f "$meta_cache_file" "$cache_dir/latex.cache"
     fi
     if [[ -z "$p_name" && $force_rebuild -eq 1 ]]; then
         __log "Cleaning and preparing environment for '$w_name'..." -t info -l wiki
-        rm -f "$meta_cache_file"
+        rm -f "$meta_cache_file" "$cache_dir/latex.cache"
         find "$BUILDDIR" -mindepth 1 -maxdepth 1 ! -name "${cache_dir##*/}" -exec rm -rf {} + 2>/dev/null || true
         rm -f "$cache_dir"/*_index_*.json "$cache_dir"/*.done 2>/dev/null || true
     fi
@@ -519,7 +519,8 @@ __build__() {
             [[ -n "$lk" ]] && LATEX_MEM_CACHE["$lk"]="${lv//$'\x01'/$'\n'}"
         done < "$latex_cache_file"
     fi
-}   
+}
+   
 
     __build_partials() {
         __sort_page_hierarchy _pages _SORTED_PAGES_LEAF_FIRST "." "leaf_first"
@@ -544,7 +545,6 @@ __build__() {
         [[ -n "$2" && -z "${BLOCK_TITLE_KEYS[$1]:-}" ]] && BLOCK_TITLE_KEYS["$1"]="$2"
         return 0
     }
-
     
     __build_main() {
         if [[ -n "$p_name" ]]; then build_targets=("$p_name")
@@ -770,6 +770,8 @@ __build__() {
             for p in "${render_targets[@]}"; do
                 rt_files+=("${page_file_map[$p]}")
             done
+            local vb_re='viewBox=[\"\'\'']([0-9.-]+)[[:space:],]+([0-9.-]+)[[:space:],]+([0-9.-]+)[[:space:],]+([0-9.-]+)[\"\'\'']'
+            local baseline_re='.*<rect x=[\"\'\''][0-9.-]+[\"\'\''] y=[\"\'\'']([0-9.-]+)[\"\'\''] width=[\"\'\'']0[\"\'\'']'
             local m_type m_expr
             while IFS=$'\x1F' read -r m_type m_expr; do
                 [[ -z "$m_expr" ]] && continue
@@ -786,12 +788,11 @@ __build__() {
                     svg_output=$("$_WIKI_DIR/bin/latex" --stdout --inline --dpr 0.4 <<< "${m_expr}\\rule{0pt}{0pt}")
                     svg_output="${svg_output//rgba(0,0,0,1)/var(--fg)}"
                     local min_y=0 height=0
-                    if [[ "$svg_output" =~ viewBox=[\"\']([0-9.-]+)[[:space:],]+([0-9.-]+)[[:space:],]+([0-9.-]+)[[:space:],]+([0-9.-]+)[\"\'] ]]; then
+                    if [[ "$svg_output" =~ $vb_re ]]; then
                         min_y="${BASH_REMATCH[2]}"
                         height="${BASH_REMATCH[4]}"
                     fi
                     local align="-10px"
-                    local baseline_re='.*<rect x="[0-9.-]+" y="([0-9.-]+)" width="0"'
                     [[ "$svg_output" =~ $baseline_re ]] && align="${BASH_REMATCH[1]}pt - (${min_y}pt + ${height}pt) - 1px"
                     LATEX_MEM_CACHE["inline:${m_expr}"]="<span class=\"latex-inline\" style=\"vertical-align: calc(${align});\">${svg_output}</span>"
                 fi
@@ -1031,7 +1032,7 @@ __build__() {
                 fi
             done
         fi
-    }
+    }   
 
     __build_search_index() {
         {

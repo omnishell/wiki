@@ -556,7 +556,8 @@ __blocks__() {
         REPLY_HAS_TEX=0
         if [[ "$str" == *"$"* ]]; then
             local math_re='^([^$]*)\$([^$]+)\$(.*)$'
-            local vb_re='viewBox="([0-9.-]+)[[:space:],]+([0-9.-]+)[[:space:],]+([0-9.-]+)[[:space:],]+([0-9.-]+)"'
+            local vb_re='viewBox=[\"\'\'']([0-9.-]+)[[:space:],]+([0-9.-]+)[[:space:],]+([0-9.-]+)[[:space:],]+([0-9.-]+)[\"\'\'']'
+            local baseline_re='.*<rect x=[\"\'\''][0-9.-]+[\"\'\''] y=[\"\'\'']([0-9.-]+)[\"\'\''] width=[\"\'\'']0[\"\'\'']'
             local out=""
             local work="$str"
             while [[ "$work" =~ $math_re ]]; do
@@ -579,7 +580,6 @@ __blocks__() {
                             pt_w="${w_val%.*}"
                         fi
                         local align="-10px"
-                        local baseline_re='.*<rect x="[0-9.-]+" y="([0-9.-]+)" width="0"'
                         [[ "$svg_output" =~ $baseline_re ]] && align="${BASH_REMATCH[1]}pt - (${min_y}pt + ${height}pt) - 1px"
                         cached_span="<span class=\"latex-inline\" style=\"vertical-align: calc(${align});\">${svg_output}</span>"
                         LATEX_MEM_CACHE["inline:${math_code}"]="$cached_span"
@@ -599,15 +599,19 @@ __blocks__() {
             out+="$work"
             REPLY_HTML="$out"
         fi
-    }
-
+    }   
+   
     __block_diagram() {
         if (( ${#diagram_buffer[@]} == 0 )); then return; fi
         local -a node_lines=() arrow_lines=()
+        local diagram_caption=""
         local line old_ifs="$IFS"
 
         for line in "${diagram_buffer[@]}"; do
-            if [[ "$line" =~ ^[[:space:]]*::[[:space:]]*(node|term)[[:space:]]*:?[[:space:]]*(.*)$ ]]; then
+            if [[ "$line" =~ ^[[:space:]]*::[[:space:]]*caption[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+                __diagram_strip_quotes_r "${BASH_REMATCH[1]}"
+                diagram_caption="$REPLY"
+            elif [[ "$line" =~ ^[[:space:]]*::[[:space:]]*(node|term)[[:space:]]*:?[[:space:]]*(.*)$ ]]; then
                 local raw_content="${BASH_REMATCH[2]}"
                 local -a tokens=()
                 __diagram_split_props "$raw_content" tokens
@@ -664,8 +668,8 @@ __blocks__() {
                 done
                 local line_count=${#text_lines[@]}
                 (( line_count == 0 )) && line_count=1
-                local w=$(( max_len * 10 + tex_w + 32 ))
-                (( w < 80 )) && w=80
+                local w=$(( (max_len * 85 + 5) / 10 + tex_w + 28 ))
+                (( w < 72 )) && w=72
                 local h=$(( line_count * 18 + 18 ))
                 (( has_tex == 1 && h < 42 )) && h=42
 
@@ -704,8 +708,8 @@ __blocks__() {
                     a_name="${a_type}_${#arrow_lines[@]}"
                 fi
 
-                local a_format="normal" a_angle="45" a_color="" a_label="" a_label_pos="above" a_size="" a_class="" l_style="continuous"
-                local a_x="" a_y="" has_coords=0
+                local a_format="normal" a_angle="" a_color="" a_label="" a_label_pos="above" a_size="" a_class="" l_style="continuous"
+                local a_x="" a_y="" has_coords=0 a_loop_dir="top"
 
                 for token in "${prop_tokens[@]}"; do
                     if [[ "$token" == *=* ]]; then
@@ -730,6 +734,7 @@ __blocks__() {
                             elif [[ "$k" == "source" || "$k" == "s" ]]; then src="$v"
                             elif [[ "$k" == "target" || "$k" == "t" ]]; then tgt="$v"
                             elif [[ "$k" == "size" ]]; then a_size="$v"
+                            elif [[ "$k" == "pos" || "$k" == "dir" ]]; then a_loop_dir="$v"
                             elif [[ "$k" == "x" ]]; then a_x="$v"; has_coords=1
                             elif [[ "$k" == "y" ]]; then a_y="$v"; has_coords=1
                             fi
@@ -770,12 +775,12 @@ __blocks__() {
                     done
                     local lbl_line_count=${#lbl_lines[@]}
                     (( lbl_line_count == 0 )) && lbl_line_count=1
-                    label_w=$(( max_lbl_len * 9 + tex_w + 16 ))
+                    label_w=$(( (max_lbl_len * 85 + 5) / 10 + tex_w + 16 ))
                     label_h=$(( lbl_line_count * 18 ))
                     (( has_tex == 1 && label_h < 28 )) && label_h=28
                 fi
 
-                arrow_lines+=("ARROW"$'\x1f'"$a_type"$'\x1f'"$a_name"$'\x1f'"$src"$'\x1f'"$tgt"$'\x1f'"$has_coords"$'\x1f'"$a_x"$'\x1f'"$a_y"$'\x1f'"$a_format"$'\x1f'"$l_style"$'\x1f'"$a_angle"$'\x1f'"$a_color"$'\x1f'"$a_size"$'\x1f'"$a_class"$'\x1f'"$a_label_pos"$'\x1f'"$has_tex"$'\x1f'"$a_label"$'\x1f'"$label_html"$'\x1f'"$label_w"$'\x1f'"$label_h")
+                arrow_lines+=("ARROW"$'\x1f'"$a_type"$'\x1f'"$a_name"$'\x1f'"$src"$'\x1f'"$tgt"$'\x1f'"$has_coords"$'\x1f'"$a_x"$'\x1f'"$a_y"$'\x1f'"$a_format"$'\x1f'"$l_style"$'\x1f'"$a_angle"$'\x1f'"$a_color"$'\x1f'"$a_size"$'\x1f'"$a_class"$'\x1f'"$a_label_pos"$'\x1f'"$has_tex"$'\x1f'"$a_label"$'\x1f'"$label_html"$'\x1f'"$label_w"$'\x1f'"$label_h"$'\x1f'"$a_loop_dir")
             fi
         done
 
@@ -783,9 +788,13 @@ __blocks__() {
 
         ((page_diagram_count++))
         local diagram_id="diagram-${page_diagram_count}"
+        local safe_caption="${diagram_caption//&/&amp;}"
+        safe_caption="${safe_caption//</&lt;}"
+        safe_caption="${safe_caption//>/&gt;}"
+        local aria_label="${safe_caption:-Diagram ${page_diagram_count}}"
 
         local diagram_svg
-        diagram_svg=$(awk -F'\x1F' -v diagram_id="$diagram_id" '
+        diagram_svg=$(awk -F'\x1F' -v diagram_id="$diagram_id" -v aria_label="$aria_label" '
         function abs(v) { return v < 0 ? -v : v }
         function min(a, b) { return a < b ? a : b }
         function max(a, b) { return a > b ? a : b }
@@ -795,7 +804,7 @@ __blocks__() {
             arrow_count = 0
             min_x = 999999; max_x = -999999
             min_y = 999999; max_y = -999999
-            max_node_w = 80; max_node_h = 36
+            max_node_w = 72; max_node_h = 36
         }
         $1 == "NODE" {
             node_count++
@@ -835,7 +844,7 @@ __blocks__() {
             arr_y[arrow_count] = ay
             arr_format[arrow_count] = $9
             arr_style[arrow_count] = $10
-            arr_angle[arrow_count] = $11 + 0
+            arr_angle_raw[arrow_count] = $11
             arr_color[arrow_count] = $12
             arr_size[arrow_count] = $13 + 0
             arr_class[arrow_count] = $14
@@ -845,6 +854,11 @@ __blocks__() {
             arr_label_html[arrow_count] = $18
             arr_label_w[arrow_count] = $19 + 0
             arr_label_h[arrow_count] = $20 + 0
+            arr_loop_dir[arrow_count] = $21
+
+            if ($4 != "" && $5 != "" && $4 != $5 && !has_c) {
+                pair_count[$4 "\x1E" $5]++
+            }
 
             if (has_c) {
                 min_x = min(min_x, ax); max_x = max(max_x, ax)
@@ -856,7 +870,6 @@ __blocks__() {
         END {
             if (node_count == 0) exit 0
 
-            # Compute minimum delta x and y
             n_ux = 0; for (ux in unique_x) { n_ux++; ux_arr[n_ux] = ux + 0 }
             n_uy = 0; for (uy in unique_y) { n_uy++; uy_arr[n_uy] = uy + 0 }
 
@@ -890,10 +903,10 @@ __blocks__() {
                 if (min_dy == 999999) min_dy = 1
             }
 
-            target_dist_x = max_node_w + 50
-            if (target_dist_x < 140) target_dist_x = 140
-            target_dist_y = max_node_h + 40
-            if (target_dist_y < 80) target_dist_y = 80
+            target_dist_x = max_node_w + 48
+            if (target_dist_x < 130) target_dist_x = 130
+            target_dist_y = max_node_h + 38
+            if (target_dist_y < 76) target_dist_y = 76
 
             scale_x = (min_dx < 1 ? target_dist_x / min_dx : target_dist_x)
             scale_y = (min_dy < 1 ? target_dist_y / min_dy : target_dist_y)
@@ -904,7 +917,6 @@ __blocks__() {
             bound_min_x = 999999; bound_max_x = -999999
             bound_min_y = 999999; bound_max_y = -999999
 
-            # Screen coordinates for nodes
             for (i = 1; i <= node_count; i++) {
                 px = (node_x[i] - min_x) * scale_x + padding_x
                 py = (max_y - node_y[i]) * scale_y + padding_y
@@ -920,9 +932,9 @@ __blocks__() {
                 bound_max_y = max(bound_max_y, py + node_h[i] / 2)
             }
 
-            # Defs
+            wavy_id = diagram_id "-wavy"
             defs_html = "<defs>\n" \
-                "    <filter id=\"wavy\" filterUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"100%\" height=\"100%\">\n" \
+                "    <filter id=\"" wavy_id "\" filterUnits=\"userSpaceOnUse\" x=\"-20%\" y=\"-20%\" width=\"140%\" height=\"140%\">\n" \
                 "        <feTurbulence type=\"fractalNoise\" baseFrequency=\"0.05\" numOctaves=\"1\" result=\"noise\"/>\n" \
                 "        <feDisplacementMap in=\"SourceGraphic\" in2=\"noise\" scale=\"5\" xChannelSelector=\"R\" yChannelSelector=\"G\"/>\n" \
                 "    </filter>\n" \
@@ -931,7 +943,6 @@ __blocks__() {
             layer_arrows = ""
             layer_labels = ""
 
-            # Multi-pass arrow layout
             for (pass = 1; pass <= 2; pass++) {
                 for (i = 1; i <= arrow_count; i++) {
                     atype = arr_type[i]
@@ -978,7 +989,6 @@ __blocks__() {
 
                     a_format = arr_format[i]
                     l_style = arr_style[i]
-                    a_angle = arr_angle[i]
                     a_color = arr_color[i]
                     a_size = arr_size[i]
                     a_class = arr_class[i]
@@ -986,9 +996,27 @@ __blocks__() {
                     has_tex = arr_has_tex[i]
                     label_raw = arr_label_raw[i]
                     label_html = arr_label_html[i]
+                    loop_dir = arr_loop_dir[i]
 
-                    path_id = "arrow-path-" (i - 1)
-                    marker_id = "arrow-marker-" (i - 1)
+                    has_angle = (arr_angle_raw[i] != "")
+                    a_angle = (has_angle ? arr_angle_raw[i] + 0 : 22)
+                    if (!has_c && src != tgt && a_format == "normal") {
+                        fwd = pair_count[src "\x1E" tgt] + 0
+                        rev = pair_count[tgt "\x1E" src] + 0
+                        if (rev > 0 || fwd > 1) {
+                            a_format = "curly"
+                            if (!has_angle) a_angle = 20
+                            if (fwd > 1) {
+                                pair_seen[src "\x1E" tgt]++
+                                idx_p = pair_seen[src "\x1E" tgt]
+                                if (idx_p % 2 == 0) a_angle = -a_angle * (idx_p / 2)
+                                else if (idx_p > 1) a_angle = a_angle * ((idx_p + 1) / 2)
+                            }
+                        }
+                    }
+
+                    path_id = diagram_id "-path-" (i - 1)
+                    marker_id = diagram_id "-marker-" (i - 1)
                     path_class_attr = " class=\"diagram-path" (a_class != "" ? " " a_class : "") "\""
                     path_color_attr = ""
                     marker_fill_attr = " class=\"diagram-marker" (a_class != "" ? " " a_class : "") "\""
@@ -1015,15 +1043,37 @@ __blocks__() {
                     tan_x = 0; tan_y = 0
 
                     if (src == tgt) {
-                        d_path = sprintf("M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f", sx, sy - hh_s, sx - 30, sy - hh_s - 42, sx + 30, sy - hh_s - 42, sx + 10, sy - hh_s - 2)
-                        mx = sx + 1
-                        my = sy - hh_s - 38
-                        tan_x = 1; tan_y = 0
-                        bound_min_x = min(bound_min_x, sx - 30)
-                        bound_max_x = max(bound_max_x, sx + 30)
-                        bound_min_y = min(bound_min_y, sy - hh_s - 42)
+                        if (loop_dir == "bottom") {
+                            d_path = sprintf("M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f", sx - 8, sy + hh_s, sx - 28, sy + hh_s + 40, sx + 28, sy + hh_s + 40, sx + 8, sy + hh_s + 2)
+                            mx = sx; my = sy + hh_s + 30
+                            tan_x = 1; tan_y = 0
+                            a_label_pos = "below"
+                            bound_min_x = min(bound_min_x, sx - 28); bound_max_x = max(bound_max_x, sx + 28)
+                            bound_max_y = max(bound_max_y, sy + hh_s + 40)
+                        } else if (loop_dir == "left") {
+                            d_path = sprintf("M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f", sx - hw_s, sy - 8, sx - hw_s - 42, sy - 26, sx - hw_s - 42, sy + 26, sx - hw_s - 2, sy + 8)
+                            mx = sx - hw_s - 31; my = sy
+                            tan_x = 0; tan_y = 1
+                            bound_min_x = min(bound_min_x, sx - hw_s - 42)
+                            bound_min_y = min(bound_min_y, sy - 26); bound_max_y = max(bound_max_y, sy + 26)
+                        } else if (loop_dir == "right") {
+                            d_path = sprintf("M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f", sx + hw_s, sy - 8, sx + hw_s + 42, sy - 26, sx + hw_s + 42, sy + 26, sx + hw_s + 2, sy + 8)
+                            mx = sx + hw_s + 31; my = sy
+                            tan_x = 0; tan_y = 1
+                            a_label_pos = "below"
+                            bound_max_x = max(bound_max_x, sx + hw_s + 42)
+                            bound_min_y = min(bound_min_y, sy - 26); bound_max_y = max(bound_max_y, sy + 26)
+                        } else {
+                            d_path = sprintf("M %.1f %.1f C %.1f %.1f, %.1f %.1f, %.1f %.1f", sx - 8, sy - hh_s, sx - 28, sy - hh_s - 40, sx + 28, sy - hh_s - 40, sx + 8, sy - hh_s - 2)
+                            mx = sx; my = sy - hh_s - 30
+                            tan_x = 1; tan_y = 0
+                            bound_min_x = min(bound_min_x, sx - 28); bound_max_x = max(bound_max_x, sx + 28)
+                            bound_min_y = min(bound_min_y, sy - hh_s - 40)
+                        }
                     } else {
                         dx = tx - sx; dy = ty - sy
+                        chord_len = sqrt(dx*dx + dy*dy)
+                        if (chord_len == 0) chord_len = 1
                         sign_dx = (dx < 0 ? -1 : (dx > 0 ? 1 : 0))
                         sign_dy = (dy < 0 ? -1 : (dy > 0 ? 1 : 0))
 
@@ -1031,8 +1081,10 @@ __blocks__() {
                             cx = (arr_x[i] - min_x) * scale_x + padding_x
                             cy = (max_y - arr_y[i]) * scale_y + padding_y
                         } else if (a_format == "curly") {
-                            cx = (sx + tx)/2 - (dy * a_angle) / 100
-                            cy = (sy + ty)/2 + (dx * a_angle) / 100
+                            curve_bulge = (chord_len * a_angle) / 100
+                            if (abs(curve_bulge) > 70) curve_bulge = (curve_bulge < 0 ? -70 : 70)
+                            cx = (sx + tx)/2 - (dy / chord_len) * curve_bulge
+                            cy = (sy + ty)/2 + (dx / chord_len) * curve_bulge
                         } else {
                             cx = (sx + tx)/2
                             cy = (sy + ty)/2
@@ -1128,16 +1180,26 @@ __blocks__() {
                     }
 
                     terms_x[aname] = mx; terms_y[aname] = my
-                    terms_w[aname] = 0; terms_h[aname] = 0
+                    terms_w[aname] = 14; terms_h[aname] = 14
 
                     path_props = ""
                     if (l_style == "dashed") path_props = " stroke-dasharray=\"6,6\""
                     else if (l_style == "dotted") path_props = " stroke-dasharray=\"0,7\" stroke-linecap=\"round\""
-                    else if (l_style == "wavy") path_props = " filter=\"url(#wavy)\""
+                    else if (l_style == "wavy") path_props = " filter=\"url(#" wavy_id ")\""
 
                     if (atype == "2-arrow") {
-                        layer_arrows = layer_arrows "<path id=\"" path_id "\" d=\"" d_path "\" fill=\"none\"" path_class_attr path_color_attr " stroke-width=\"3\"" path_props " />\n"
-                        layer_arrows = layer_arrows "<path d=\"" d_path "\" fill=\"none\" class=\"diagram-bg-stroke\" stroke-width=\"1.5\"" path_props " />\n"
+                        d_shaft = d_path
+                        if (src != tgt && a_format != "curly" && !has_c) {
+                            s_dx = ntx - nsx; s_dy = nty - nsy
+                            s_len = sqrt(s_dx*s_dx + s_dy*s_dy)
+                            if (s_len > 6) {
+                                stx = ntx - (s_dx / s_len) * 2.5
+                                sty = nty - (s_dy / s_len) * 2.5
+                                d_shaft = sprintf("M %.1f %.1f L %.1f %.1f", nsx, nsy, stx, sty)
+                            }
+                        }
+                        layer_arrows = layer_arrows "<path id=\"" path_id "\" d=\"" d_shaft "\" fill=\"none\"" path_class_attr path_color_attr " stroke-width=\"3\"" path_props " />\n"
+                        layer_arrows = layer_arrows "<path d=\"" d_shaft "\" fill=\"none\" class=\"diagram-bg-stroke\" stroke-width=\"1.5\"" path_props " />\n"
                     } else {
                         layer_arrows = layer_arrows "<path id=\"" path_id "\" d=\"" d_path "\" fill=\"none\"" path_class_attr path_color_attr " stroke-width=\"1.5\"" path_props " />\n"
                     }
@@ -1149,7 +1211,7 @@ __blocks__() {
                         ux = tan_x / tan_len; uy = tan_y / tan_len
                         nx = -uy; ny = ux
                         if (ny > 0 || (ny == 0 && nx > 0)) { nx = -nx; ny = -ny }
-                        dist_lbl = 16
+                        dist_lbl = 15
                         if (a_label_pos == "below") { lx = mx - dist_lbl * nx; ly = my - dist_lbl * ny }
                         else { lx = mx + dist_lbl * nx; ly = my + dist_lbl * ny }
 
@@ -1159,8 +1221,8 @@ __blocks__() {
                             else { txt_anchor = "end"; lx = mx - 10 }
                         }
 
-                        lbl_w = max(arr_label_w[i], 40)
-                        lbl_h = max(arr_label_h[i], 20)
+                        lbl_w = max(arr_label_w[i], 32)
+                        lbl_h = max(arr_label_h[i], 18)
                         if (txt_anchor == "start") {
                             lbl_x1 = lx
                             lbl_x2 = lx + lbl_w
@@ -1183,7 +1245,8 @@ __blocks__() {
                             gsub(/\\n/, "<br/>", label_html)
                             lbl_x = lbl_x1
                             lbl_y = lbl_y1
-                            layer_labels = layer_labels "<foreignObject x=\"" lbl_x "\" y=\"" lbl_y "\" width=\"" lbl_w "\" height=\"" lbl_h "\" style=\"overflow: visible;\"><div xmlns=\"http://www.w3.org/1999/xhtml\" style=\"display: inline-flex; flex-direction: column; align-items: " (txt_anchor == "start" ? "flex-start" : (txt_anchor == "end" ? "flex-end" : "center")) "; justify-content: center; text-align: " (txt_anchor == "start" ? "left" : (txt_anchor == "end" ? "right" : "center")) "; background: var(--bg-code, #ffffff); border-radius: 3px; padding: 1px 4px; font-family: var(--family-diagram, monospace); font-size: 14px; pointer-events: none;\">" label_html "</div></foreignObject>\n"
+                            fo_class = "diagram-label-tex" (a_class != "" ? " " a_class : "")
+                            layer_labels = layer_labels "<foreignObject x=\"" lbl_x "\" y=\"" lbl_y "\" width=\"" lbl_w "\" height=\"" lbl_h "\" style=\"overflow: visible;\"><div xmlns=\"http://www.w3.org/1999/xhtml\" class=\"" fo_class "\" style=\"display: inline-flex; flex-direction: column; align-items: " (txt_anchor == "start" ? "flex-start" : (txt_anchor == "end" ? "flex-end" : "center")) "; justify-content: center; text-align: " (txt_anchor == "start" ? "left" : (txt_anchor == "end" ? "right" : "center")) "; width: 100%; height: 100%; background: var(--bg, #ffffff); border-radius: 3px; padding: 1px 4px; font-family: var(--family-diagram, monospace); font-size: 14px; pointer-events: none;\">" label_html "</div></foreignObject>\n"
                         } else {
                             n_lines = split(label_raw, l_arr, "\\\\n")
                             if (n_lines <= 1) {
@@ -1260,29 +1323,33 @@ __blocks__() {
             final_h = bound_max_y - bound_min_y
 
             printf "<div id=\"%s\" class=\"diagram-container\" style=\"overflow-x: auto;\">\n", diagram_id
-            printf "<svg width=\"%.0f\" height=\"%.0f\" viewBox=\"%.0f %.0f %.0f %.0f\" xmlns=\"http://www.w3.org/2000/svg\" style=\"max-width: none; display: block;\">\n", final_w, final_h, bound_min_x, bound_min_y, final_w, final_h
+            printf "<svg role=\"img\" aria-label=\"%s\" width=\"%.0f\" height=\"%.0f\" viewBox=\"%.0f %.0f %.0f %.0f\" xmlns=\"http://www.w3.org/1999/xhtml\" style=\"max-width: none; display: block;\">\n", aria_label, final_w, final_h, bound_min_x, bound_min_y, final_w, final_h
             printf "<style>\n"
-            printf "    .diagram-node { fill: var(--bg-code, #ffffff); stroke: var(--gray4, #333333); }\n"
-            printf "    .diagram-text, .diagram-text * { fill: var(--fg, #333333); font-family: var(--family-diagram, monospace) !important; font-size: 14px; }\n"
-            printf "    .diagram-label, .diagram-label * { paint-order: stroke fill; stroke: var(--bg-code, #ffffff); stroke-width: 4px; stroke-linejoin: round; }\n"
-            printf "    .diagram-path { stroke: var(--gray4, #333333); }\n"
-            printf "    .diagram-bg-stroke { stroke: var(--bg, #ffffff); }\n"
-            printf "    .diagram-marker { fill: var(--gray4, #333333); }\n"
-            printf "    svg text, svg tspan { font-family: var(--family-diagram, monospace) !important; font-size: 14px !important; }\n"
-            printf "    .latex-inline svg { vertical-align: middle; }\n"
+            printf "    #%s .diagram-node { fill: var(--bg-code, #ffffff); stroke: var(--gray4, #333333); }\n", diagram_id
+            printf "    #%s .diagram-text, #%s .diagram-text * { fill: var(--fg, #333333); font-family: var(--family-diagram, monospace) !important; font-size: 14px; }\n", diagram_id, diagram_id
+            printf "    #%s .diagram-label, #%s .diagram-label * { paint-order: stroke fill; stroke: var(--bg-code, #ffffff); stroke-width: 4px; stroke-linejoin: round; }\n", diagram_id, diagram_id
+            printf "    #%s .diagram-path { stroke: var(--gray4, #333333); }\n", diagram_id
+            printf "    #%s .diagram-bg-stroke { stroke: var(--bg, #ffffff); }\n", diagram_id
+            printf "    #%s .diagram-marker { fill: var(--gray4, #333333); }\n", diagram_id
+            printf "    #%s text, #%s tspan { font-family: var(--family-diagram, monospace) !important; font-size: 14px !important; }\n", diagram_id, diagram_id
+            printf "    #%s .latex-inline svg { vertical-align: middle; }\n", diagram_id
             printf "</style>\n"
             printf "%s\n", defs_html
             printf "%s", layer_arrows
             printf "%s", layer_labels
             printf "%s", layer_nodes
-            printf "</svg>\n</div>"
+            printf "</svg>"
         }
         ' <<< "$(printf "%s\n" "${node_lines[@]}" "${arrow_lines[@]}")")
 
-        content+="${diagram_svg}"$'\n'
-        LIST_HTML_MAP["diagram"]+="<li><a href=\"#${diagram_id}\">Diagram ${page_diagram_count}</a></li>"$'\n'
-    }
+        if [[ -n "$safe_caption" ]]; then
+            diagram_svg+=$'\n'"<p><a href=\"#${diagram_id}\" class=\"diagram-caption\">${safe_caption}</a></p>"
+        fi
+        diagram_svg+=$'\n'"</div>"
 
+        content+="${diagram_svg}"$'\n'
+        LIST_HTML_MAP["diagram"]+="<li><a href=\"#${diagram_id}\">${safe_caption:-Diagram ${page_diagram_count}}</a></li>"$'\n'
+    }
 
     __block_plain() {
         local bname="$1"
