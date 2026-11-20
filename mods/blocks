@@ -999,13 +999,17 @@ __blocks__() {
                     loop_dir = arr_loop_dir[i]
 
                     has_angle = (arr_angle_raw[i] != "")
-                    a_angle = (has_angle ? arr_angle_raw[i] + 0 : 22)
+                    a_angle = (has_angle ? arr_angle_raw[i] + 0 : 45)
+                    auto_curved = 0
                     if (!has_c && src != tgt && a_format == "normal") {
                         fwd = pair_count[src "\x1E" tgt] + 0
                         rev = pair_count[tgt "\x1E" src] + 0
                         if (rev > 0 || fwd > 1) {
                             a_format = "curly"
-                            if (!has_angle) a_angle = 20
+                            if (!has_angle) {
+                                a_angle = 20
+                                auto_curved = 1
+                            }
                             if (fwd > 1) {
                                 pair_seen[src "\x1E" tgt]++
                                 idx_p = pair_seen[src "\x1E" tgt]
@@ -1082,7 +1086,9 @@ __blocks__() {
                             cy = (max_y - arr_y[i]) * scale_y + padding_y
                         } else if (a_format == "curly") {
                             curve_bulge = (chord_len * a_angle) / 100
-                            if (abs(curve_bulge) > 70) curve_bulge = (curve_bulge < 0 ? -70 : 70)
+                            if (auto_curved && abs(curve_bulge) > 70) {
+                                curve_bulge = (curve_bulge < 0 ? -70 : 70)
+                            }
                             cx = (sx + tx)/2 - (dy / chord_len) * curve_bulge
                             cy = (sy + ty)/2 + (dx / chord_len) * curve_bulge
                         } else {
@@ -1323,7 +1329,7 @@ __blocks__() {
             final_h = bound_max_y - bound_min_y
 
             printf "<div id=\"%s\" class=\"diagram-container\" style=\"overflow-x: auto;\">\n", diagram_id
-            printf "<svg role=\"img\" aria-label=\"%s\" width=\"%.0f\" height=\"%.0f\" viewBox=\"%.0f %.0f %.0f %.0f\" xmlns=\"http://www.w3.org/1999/xhtml\" style=\"max-width: none; display: block;\">\n", aria_label, final_w, final_h, bound_min_x, bound_min_y, final_w, final_h
+            printf "<svg role=\"img\" aria-label=\"%s\" width=\"%.0f\" height=\"%.0f\" viewBox=\"%.0f %.0f %.0f %.0f\" xmlns=\"http://www.w3.org/2000/svg\" style=\"max-width: none; display: block;\">\n", aria_label, final_w, final_h, bound_min_x, bound_min_y, final_w, final_h
             printf "<style>\n"
             printf "    #%s .diagram-node { fill: var(--bg-code, #ffffff); stroke: var(--gray4, #333333); }\n", diagram_id
             printf "    #%s .diagram-text, #%s .diagram-text * { fill: var(--fg, #333333); font-family: var(--family-diagram, monospace) !important; font-size: 14px; }\n", diagram_id, diagram_id
@@ -1348,8 +1354,8 @@ __blocks__() {
         diagram_svg+=$'\n'"</div>"
 
         content+="${diagram_svg}"$'\n'
-        LIST_HTML_MAP["diagram"]+="<li><a href=\"#${diagram_id}\">${safe_caption:-Diagram ${page_diagram_count}}</a></li>"$'\n'
-    }
+        LIST_HTML_MAP["diagram"]+="<li><a href=\"#${diagram_id}\">Diagram ${page_diagram_count}</a></li>"$'\n'
+    }   
 
     __block_plain() {
         local bname="$1"
