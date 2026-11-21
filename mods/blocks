@@ -126,7 +126,7 @@ __blocks__() {
                 fi
             done
             if [[ -n "$first_dk" ]]; then
-                BLOCK_DISPLAY_VALS["$first_dk"]+=" <span class=\"def-context\">(${BLOCK_VALS[__context__]})</span>"
+                BLOCK_DISPLAY_VALS["$first_dk"]+=" <span class=\"block-context-delimiter\">(</span><span class=\"block-context\">${BLOCK_VALS[__context__]}</span><span class=\"block-context-delimiter\">)</span>"
             fi
         fi
         local -a html_parts=(
