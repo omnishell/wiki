@@ -30,7 +30,7 @@ __blocks__() {
                     inner="${inner%"${inner##*[![:space:]]}"}"
                     if [[ "$inner" == "block.end" ]]; then
                         (( nested_depth > 0 )) && (( nested_depth-- ))
-                    elif [[ "$inner" == block.* ]]; then
+                    elif [[ "$inner" == block.* && "$r_trim" != *"block.end"* ]]; then
                         (( nested_depth++ ))
                     fi
                 fi
@@ -196,7 +196,7 @@ __blocks__() {
         fi
         LIST_HTML_MAP["$bname"]+="<li><a href=\"#${anchor_id}\">${BLOCK_TITLE}</a></li>"$'\n'
     }
-
+    
     
     __block_quote() {
         local bname="$1"
@@ -602,12 +602,39 @@ __blocks__() {
     }   
    
     __block_diagram() {
-        if (( ${#diagram_buffer[@]} == 0 )); then return; fi
-        local -a node_lines=() arrow_lines=()
+        local -a _local_diag_buf=()
+        local cls_prefix="diagram"
+        if [[ -n "${2:-}" ]]; then
+            local -n _passed_buf="$2"
+            _local_diag_buf=("${_passed_buf[@]}")
+            cls_prefix="block-diagram"
+        else
+            _local_diag_buf=("${diagram_buffer[@]}")
+            (( ${_IN_NESTED_BLOCK:-0} == 1 )) && cls_prefix="block-diagram"
+        fi
+        if (( ${#_local_diag_buf[@]} == 0 )); then return; fi
+        local -a node_lines=() arrow_lines=() expanded_diag_lines=()
         local diagram_caption=""
         local line old_ifs="$IFS"
 
-        for line in "${diagram_buffer[@]}"; do
+        for line in "${_local_diag_buf[@]}"; do
+            if [[ "$line" == *" :: "* ]]; then
+                local split_dl="${line// :: /$'\n':: }"
+                set -f
+                IFS=$'\n'
+                local -a sub_dls=($split_dl)
+                IFS="$old_ifs"
+                set +f
+                local sub_dl
+                for sub_dl in "${sub_dls[@]}"; do
+                    [[ -n "${sub_dl//[[:space:]]/}" ]] && expanded_diag_lines+=("$sub_dl")
+                done
+            else
+                expanded_diag_lines+=("$line")
+            fi
+        done
+
+        for line in "${expanded_diag_lines[@]}"; do
             if [[ "$line" =~ ^[[:space:]]*::[[:space:]]*caption[[:space:]]*:[[:space:]]*(.*)$ ]]; then
                 __diagram_strip_quotes_r "${BASH_REMATCH[1]}"
                 diagram_caption="$REPLY"
@@ -787,14 +814,14 @@ __blocks__() {
         if (( ${#node_lines[@]} == 0 )); then return; fi
 
         ((page_diagram_count++))
-        local diagram_id="diagram-${page_diagram_count}"
+        local diagram_id="${cls_prefix}-${page_diagram_count}"
         local safe_caption="${diagram_caption//&/&amp;}"
         safe_caption="${safe_caption//</&lt;}"
         safe_caption="${safe_caption//>/&gt;}"
         local aria_label="${safe_caption:-Diagram ${page_diagram_count}}"
 
         local diagram_svg
-        diagram_svg=$(awk -F'\x1F' -v diagram_id="$diagram_id" -v aria_label="$aria_label" '
+        diagram_svg=$(awk -F'\x1F' -v diagram_id="$diagram_id" -v aria_label="$aria_label" -v cp="$cls_prefix" '
         function abs(v) { return v < 0 ? -v : v }
         function min(a, b) { return a < b ? a : b }
         function max(a, b) { return a > b ? a : b }
@@ -1021,10 +1048,10 @@ __blocks__() {
 
                     path_id = diagram_id "-path-" (i - 1)
                     marker_id = diagram_id "-marker-" (i - 1)
-                    path_class_attr = " class=\"diagram-path" (a_class != "" ? " " a_class : "") "\""
+                    path_class_attr = " class=\"" cp "-path" (a_class != "" ? " " a_class : "") "\""
                     path_color_attr = ""
-                    marker_fill_attr = " class=\"diagram-marker" (a_class != "" ? " " a_class : "") "\""
-                    label_class_attr = " class=\"diagram-text diagram-label" (a_class != "" ? " " a_class : "") "\""
+                    marker_fill_attr = " class=\"" cp "-marker" (a_class != "" ? " " a_class : "") "\""
+                    label_class_attr = " class=\"" cp "-text " cp "-label" (a_class != "" ? " " a_class : "") "\""
                     label_color_attr = ""
 
                     if (a_color != "" && a_color != "currentColor") {
@@ -1035,7 +1062,7 @@ __blocks__() {
                     }
 
                     if (atype == "2-arrow") {
-                        m_stroke = " class=\"diagram-path" (a_class != "" ? " " a_class : "") "\""
+                        m_stroke = " class=\"" cp "-path" (a_class != "" ? " " a_class : "") "\""
                         if (a_color != "" && a_color != "currentColor") m_stroke = (a_class != "" ? " class=\"" a_class "\"" : "") " stroke=\"" a_color "\""
                         defs_html = defs_html "<marker id=\"" marker_id "\" viewBox=\"0 0 10 10\" refX=\"6\" refY=\"5\" markerWidth=\"8\" markerHeight=\"8\" orient=\"auto-start-reverse\"><path d=\"M 0 1 L 7 5 L 0 9\" fill=\"none\"" m_stroke " stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></marker>\n"
                     } else {
@@ -1205,7 +1232,7 @@ __blocks__() {
                             }
                         }
                         layer_arrows = layer_arrows "<path id=\"" path_id "\" d=\"" d_shaft "\" fill=\"none\"" path_class_attr path_color_attr " stroke-width=\"3\"" path_props " />\n"
-                        layer_arrows = layer_arrows "<path d=\"" d_shaft "\" fill=\"none\" class=\"diagram-bg-stroke\" stroke-width=\"1.5\"" path_props " />\n"
+                        layer_arrows = layer_arrows "<path d=\"" d_shaft "\" fill=\"none\" class=\"" cp "-bg-stroke\" stroke-width=\"1.5\"" path_props " />\n"
                     } else {
                         layer_arrows = layer_arrows "<path id=\"" path_id "\" d=\"" d_path "\" fill=\"none\"" path_class_attr path_color_attr " stroke-width=\"1.5\"" path_props " />\n"
                     }
@@ -1251,7 +1278,7 @@ __blocks__() {
                             gsub(/\\n/, "<br/>", label_html)
                             lbl_x = lbl_x1
                             lbl_y = lbl_y1
-                            fo_class = "diagram-label-tex" (a_class != "" ? " " a_class : "")
+                            fo_class = cp "-label-tex" (a_class != "" ? " " a_class : "")
                             layer_labels = layer_labels "<foreignObject x=\"" lbl_x "\" y=\"" lbl_y "\" width=\"" lbl_w "\" height=\"" lbl_h "\" style=\"overflow: visible;\"><div xmlns=\"http://www.w3.org/1999/xhtml\" class=\"" fo_class "\" style=\"display: inline-flex; flex-direction: column; align-items: " (txt_anchor == "start" ? "flex-start" : (txt_anchor == "end" ? "flex-end" : "center")) "; justify-content: center; text-align: " (txt_anchor == "start" ? "left" : (txt_anchor == "end" ? "right" : "center")) "; width: 100%; height: 100%; background: var(--bg, #ffffff); border-radius: 3px; padding: 1px 4px; font-family: var(--family-diagram, monospace); font-size: 14px; pointer-events: none;\">" label_html "</div></foreignObject>\n"
                         } else {
                             n_lines = split(label_raw, l_arr, "\\\\n")
@@ -1297,7 +1324,7 @@ __blocks__() {
                 if (border == "none" || border == "") inline_style = inline_style "stroke: none; "
                 style_attr = (inline_style != "" ? " style=\"" inline_style "\"" : "")
 
-                layer_nodes = layer_nodes "<rect x=\"" bx "\" y=\"" by "\" width=\"" w "\" height=\"" h "\" rx=\"" rx "\" class=\"diagram-node" (n_class != "" ? " " n_class : "") "\" stroke-width=\"1.5\"" style_attr " />\n"
+                layer_nodes = layer_nodes "<rect x=\"" bx "\" y=\"" by "\" width=\"" w "\" height=\"" h "\" rx=\"" rx "\" class=\"" cp "-node" (n_class != "" ? " " n_class : "") "\" stroke-width=\"1.5\"" style_attr " />\n"
 
                 if (has_tex) {
                     gsub(/\\n/, "<br/>", html_text)
@@ -1305,7 +1332,7 @@ __blocks__() {
                 } else {
                     n_lines = split(raw_text, l_arr, "\\\\n")
                     if (n_lines <= 1) {
-                        layer_nodes = layer_nodes "<text x=\"" tx "\" y=\"" ty "\" text-anchor=\"middle\" dominant-baseline=\"central\" class=\"diagram-text" (n_class != "" ? " " n_class : "") "\"><tspan x=\"" tx "\" dy=\"0\">" raw_text "</tspan></text>\n"
+                        layer_nodes = layer_nodes "<text x=\"" tx "\" y=\"" ty "\" text-anchor=\"middle\" dominant-baseline=\"central\" class=\"" cp "-text" (n_class != "" ? " " n_class : "") "\"><tspan x=\"" tx "\" dy=\"0\">" raw_text "</tspan></text>\n"
                     } else {
                         line_height = 18
                         start_dy = - (n_lines - 1) * line_height / 2
@@ -1314,7 +1341,7 @@ __blocks__() {
                             ldy = (l == 1 ? start_dy : line_height)
                             tspans = tspans "<tspan x=\"" tx "\" dy=\"" ldy "\">" l_arr[l] "</tspan>"
                         }
-                        layer_nodes = layer_nodes "<text x=\"" tx "\" y=\"" ty "\" text-anchor=\"middle\" dominant-baseline=\"central\" class=\"diagram-text" (n_class != "" ? " " n_class : "") "\">" tspans "</text>\n"
+                        layer_nodes = layer_nodes "<text x=\"" tx "\" y=\"" ty "\" text-anchor=\"middle\" dominant-baseline=\"central\" class=\"" cp "-text" (n_class != "" ? " " n_class : "") "\">" tspans "</text>\n"
                     }
                 }
             }
@@ -1328,15 +1355,15 @@ __blocks__() {
             final_w = bound_max_x - bound_min_x
             final_h = bound_max_y - bound_min_y
 
-            printf "<div id=\"%s\" class=\"diagram-container\" style=\"overflow-x: auto;\">\n", diagram_id
+            printf "<div id=\"%s\" class=\"%s-container\" style=\"overflow-x: auto;\">\n", diagram_id, cp
             printf "<svg role=\"img\" aria-label=\"%s\" width=\"%.0f\" height=\"%.0f\" viewBox=\"%.0f %.0f %.0f %.0f\" xmlns=\"http://www.w3.org/2000/svg\" style=\"max-width: none; display: block;\">\n", aria_label, final_w, final_h, bound_min_x, bound_min_y, final_w, final_h
             printf "<style>\n"
-            printf "    #%s .diagram-node { fill: var(--bg-code, #ffffff); stroke: var(--gray4, #333333); }\n", diagram_id
-            printf "    #%s .diagram-text, #%s .diagram-text * { fill: var(--fg, #333333); font-family: var(--family-diagram, monospace) !important; font-size: 14px; }\n", diagram_id, diagram_id
-            printf "    #%s .diagram-label, #%s .diagram-label * { paint-order: stroke fill; stroke: var(--bg-code, #ffffff); stroke-width: 4px; stroke-linejoin: round; }\n", diagram_id, diagram_id
-            printf "    #%s .diagram-path { stroke: var(--gray4, #333333); }\n", diagram_id
-            printf "    #%s .diagram-bg-stroke { stroke: var(--bg, #ffffff); }\n", diagram_id
-            printf "    #%s .diagram-marker { fill: var(--gray4, #333333); }\n", diagram_id
+            printf "    #%s .%s-node { fill: var(--bg-code, #ffffff); stroke: var(--gray4, #333333); }\n", diagram_id, cp
+            printf "    #%s .%s-text, #%s .%s-text * { fill: var(--fg, #333333); font-family: var(--family-diagram, monospace) !important; font-size: 14px; }\n", diagram_id, cp, diagram_id, cp
+            printf "    #%s .%s-label, #%s .%s-label * { paint-order: stroke fill; stroke: var(--bg-code, #ffffff); stroke-width: 4px; stroke-linejoin: round; }\n", diagram_id, cp, diagram_id, cp
+            printf "    #%s .%s-path { stroke: var(--gray4, #333333); }\n", diagram_id, cp
+            printf "    #%s .%s-bg-stroke { stroke: var(--bg, #ffffff); }\n", diagram_id, cp
+            printf "    #%s .%s-marker { fill: var(--gray4, #333333); }\n", diagram_id, cp
             printf "    #%s text, #%s tspan { font-family: var(--family-diagram, monospace) !important; font-size: 14px !important; }\n", diagram_id, diagram_id
             printf "    #%s .latex-inline svg { vertical-align: middle; }\n", diagram_id
             printf "</style>\n"
@@ -1349,13 +1376,13 @@ __blocks__() {
         ' <<< "$(printf "%s\n" "${node_lines[@]}" "${arrow_lines[@]}")")
 
         if [[ -n "$safe_caption" ]]; then
-            diagram_svg+=$'\n'"<p><a href=\"#${diagram_id}\" class=\"diagram-caption\">${safe_caption}</a></p>"
+            diagram_svg+=$'\n'"<p><a href=\"#${diagram_id}\" class=\"${cls_prefix}-caption\">${safe_caption}</a></p>"
         fi
         diagram_svg+=$'\n'"</div>"
 
         content+="${diagram_svg}"$'\n'
         LIST_HTML_MAP["diagram"]+="<li><a href=\"#${diagram_id}\">Diagram ${page_diagram_count}</a></li>"$'\n'
-    }   
+    }    
 
     __block_plain() {
         local bname="$1"

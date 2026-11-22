@@ -271,6 +271,7 @@ __parse__() {
         done
     }
 
+
     __parse_block_field_r() {
         local _field_ref="$1"
         REPLY=""
@@ -282,7 +283,7 @@ __parse__() {
         [[ -z "$_field_ref" ]] && return 0
         local bt=$'\x60'
         local btt=$'\x60\x60\x60'
-        if [[ "$_field_ref" != *$'\n'* && "$_field_ref" != "::"* && "$_field_ref" != *"$btt"* && "$_field_ref" != *"$$"* && "$_field_ref" != *"block.tex"* && "$_field_ref" != *"block.code"* && "$_field_ref" != [-*+]\ * && "$_field_ref" != [0-9]*.\ * ]]; then
+        if [[ "$_field_ref" != *$'\n'* && "$_field_ref" != "::"* && "$_field_ref" != *"$btt"* && "$_field_ref" != *"$$"* && "$_field_ref" != *"block.tex"* && "$_field_ref" != *"block.code"* && "$_field_ref" != *"block.diagram"* && "$_field_ref" != *"block.table"* && "$_field_ref" != [-*+]\ * && "$_field_ref" != [0-9]*.\ * ]]; then
             local l="$_field_ref"
             if [[ "$l" == *["$bt"*_+\[\{\$]* ]]; then
                 local prefix rest inner suffix
@@ -382,12 +383,13 @@ __parse__() {
         done
         local out=""
         local in_inner=0 in_html_pre=0 list_depth=0 after_block=0 first_code_line=0 code_lang=""
-        local -a tex_lines=()
+        local -a tex_lines=() inner_block_lines=()
         local prefix rest inner suffix l_trim r_trim
         local -a LIST_INDENTS=() LIST_TYPES=()
         local list_item_re='^([[:space:]]*)([-*+]|[0-9]+\.)[[:space:]]+(.*)$'
         local link_re='\[([^]]+)\]\(([^)]+)\)'
         local ext_re='^(.*)\.(md|markdown|MD|MARKDOWN)([ \t#].*)?$'
+        local inline_diag_re='^(.*)\{\{[[:space:]]*block\.diagram[[:space:]]*\}\}(.*)\{\{[[:space:]]*block\.end[[:space:]]*\}\}(.*)$'
         for l in "${field_lines[@]}"; do
             if (( base_indent > 0 )); then
                 if [[ -n "${l#"${l%%[![:space:]]*}"}" ]]; then
@@ -402,6 +404,89 @@ __parse__() {
                     l_trim="${l#"${l%%[![:space:]]*}"}"
                 fi
                 r_trim="${l_trim%"${l_trim##*[![:space:]]}"}"
+                if [[ "$r_trim" =~ $inline_diag_re ]]; then
+                    local pre_diag="${BASH_REMATCH[1]}"
+                    local mid_diag="${BASH_REMATCH[2]}"
+                    local post_diag="${BASH_REMATCH[3]}"
+                    while (( list_depth > 0 )); do
+                        list_depth=$((list_depth - 1))
+                        out+="</li></${LIST_TYPES[list_depth]}>"
+                    done
+                    LIST_INDENTS=()
+                    LIST_TYPES=()
+                    out="${out%"${out##*[!$'\n']}"}"
+                    if [[ -n "${pre_diag//[[:space:]]/}" ]]; then
+                        local pre_parsed=""
+                        __parse_block_field_r "$pre_diag"
+                        pre_parsed="$REPLY"
+                        out+="${out:+$nl}$pre_parsed"
+                    fi
+                    local -a saved_diag_buf=("${diagram_buffer[@]}")
+                    local saved_content="$content"
+                    diagram_buffer=()
+                    local diag_tmp=" ${mid_diag}"
+                    diag_tmp="${diag_tmp// :: /$'\n':: }"
+                    set -f
+                    IFS=$'\n'
+                    local -a d_parts=($diag_tmp)
+                    IFS="$old_ifs"
+                    set +f
+                    local d_ln
+                    for d_ln in "${d_parts[@]}"; do
+                        [[ -n "${d_ln//[[:space:]]/}" ]] && diagram_buffer+=("$d_ln")
+                    done
+                    content=""
+                    local _IN_NESTED_BLOCK=1
+                    __block_diagram
+                    local diag_html="$content"
+                    content="$saved_content"
+                    diagram_buffer=("${saved_diag_buf[@]}")
+                    out+="${diag_html%$'\n'}"
+                    if [[ -n "${post_diag//[[:space:]]/}" ]]; then
+                        local post_parsed=""
+                        __parse_block_field_r "$post_diag"
+                        post_parsed="$REPLY"
+                        out+="$post_parsed"
+                    fi
+                    after_block=1
+                    continue
+                fi
+                if [[ "$r_trim" == "{{"*"block.diagram"*"}}" ]]; then
+                    local inner_d="${r_trim#\{\{}"
+                    inner_d="${inner_d%\}\}}"
+                    inner_d="${inner_d#"${inner_d%%[![:space:]]*}"}"
+                    inner_d="${inner_d%"${inner_d##*[![:space:]]}"}"
+                    if [[ "$inner_d" == "block.diagram" ]]; then
+                        while (( list_depth > 0 )); do
+                            list_depth=$((list_depth - 1))
+                            out+="</li></${LIST_TYPES[list_depth]}>"
+                        done
+                        LIST_INDENTS=()
+                        LIST_TYPES=()
+                        out="${out%"${out##*[!$'\n']}"}"
+                        in_inner=5
+                        inner_block_lines=()
+                        continue
+                    fi
+                fi
+                if [[ "$r_trim" == "{{"*"block.table"*"}}" ]]; then
+                    local inner_tb="${r_trim#\{\{}"
+                    inner_tb="${inner_tb%\}\}}"
+                    inner_tb="${inner_tb#"${inner_tb%%[![:space:]]*}"}"
+                    inner_tb="${inner_tb%"${inner_tb##*[![:space:]]}"}"
+                    if [[ "$inner_tb" == "block.table" ]]; then
+                        while (( list_depth > 0 )); do
+                            list_depth=$((list_depth - 1))
+                            out+="</li></${LIST_TYPES[list_depth]}>"
+                        done
+                        LIST_INDENTS=()
+                        LIST_TYPES=()
+                        out="${out%"${out##*[!$'\n']}"}"
+                        in_inner=6
+                        inner_block_lines=()
+                        continue
+                    fi
+                fi
                 if [[ "$r_trim" == "{{"*"block.code"*"}}" ]]; then
                     local inner_c="${r_trim#\{\{}"
                     inner_c="${inner_c%\}\}}"
@@ -747,6 +832,56 @@ __parse__() {
                 else
                     tex_lines+=("$l")
                 fi
+            elif (( in_inner == 5 )); then
+                local raw_d_line="$l"
+                l_trim="${l#"${l%%[![:space:]]*}"}"
+                local check_end="$l_trim"
+                if [[ "$check_end" == "::"* ]]; then
+                    check_end="${check_end#::}"
+                    check_end="${check_end#"${check_end%%[![:space:]]*}"}"
+                fi
+                r_trim="${check_end%"${check_end##*[![:space:]]}"}"
+                if [[ "$r_trim" == "{{"*"block.end"*"}}" ]]; then
+                    in_inner=0
+                    local -a saved_diag_buf=("${diagram_buffer[@]}")
+                    local saved_content="$content"
+                    diagram_buffer=("${inner_block_lines[@]}")
+                    content=""
+                    local _IN_NESTED_BLOCK=1
+                    __block_diagram
+                    local diag_html="$content"
+                    content="$saved_content"
+                    diagram_buffer=("${saved_diag_buf[@]}")
+                    out+="${diag_html%$'\n'}"
+                    after_block=1
+                else
+                    inner_block_lines+=("$raw_d_line")
+                fi
+            elif (( in_inner == 6 )); then
+                l_trim="${l#"${l%%[![:space:]]*}"}"
+                local check_end="$l_trim"
+                if [[ "$check_end" == "::"* ]]; then
+                    check_end="${check_end#::}"
+                    [[ "$check_end" == [[:blank:]]* ]] && check_end="${check_end:1}"
+                    l="$check_end"
+                    check_end="${check_end#"${check_end%%[![:space:]]*}"}"
+                fi
+                r_trim="${check_end%"${check_end##*[![:space:]]}"}"
+                if [[ "$r_trim" == "{{"*"block.end"*"}}" ]]; then
+                    in_inner=0
+                    local -a saved_tbl_buf=("${table_buffer[@]}")
+                    local saved_content="$content"
+                    table_buffer=("${inner_block_lines[@]}")
+                    content=""
+                    __block_table
+                    local tbl_html="$content"
+                    content="$saved_content"
+                    table_buffer=("${saved_tbl_buf[@]}")
+                    out+="${tbl_html%$'\n'}"
+                    after_block=1
+                else
+                    inner_block_lines+=("$l")
+                fi
             fi
         done
         if (( list_depth > 0 )); then
@@ -759,8 +894,7 @@ __parse__() {
         fi
         REPLY="$out"
         return 0
-    }    
-
+    }   
 
     __parse_block_field() {
         __parse_block_field_r "$@"
@@ -912,7 +1046,7 @@ __parse__() {
                             esac
                             in_custom_block=""; custom_block_indent=""; custom_block_depth=0; ignore_next_empty=1; was_empty=1; return 0
                         fi
-                    elif [[ "$inner" == "block."* && "$in_custom_block" != "row" && "$in_custom_block" != "carousel" && "$in_custom_block" != "grid" && "$in_custom_block" != "text" ]]; then
+                    elif [[ "$inner" == "block."* && "$r_trim" != *"block.end"* && "$in_custom_block" != "row" && "$in_custom_block" != "carousel" && "$in_custom_block" != "grid" && "$in_custom_block" != "text" ]]; then
                         (( custom_block_depth++ ))
                     fi
                 fi
@@ -989,7 +1123,8 @@ __parse__() {
             fi
         fi
         return 1
-    }  
+    }    
+
 
     __parse_vars() {
         if [[ "$line" == *"{{"* ]]; then
