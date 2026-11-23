@@ -495,7 +495,7 @@ fn render_single_page(
         let _ = fs::create_dir_all(parent);
     }
     let _ = fs::write(&out_path, final_html);
-    eprintln!("wiki:success: Rendered -> {}", out_path.display());
+    println!("wiki:success: Rendered -> {}", out_path.display());
 
     Some(PageRenderOutput {
         slug: pagename.to_string(),
@@ -681,7 +681,7 @@ fn write_search_index_json(path: &Path, map: &BTreeMap<String, String>) {
 fn write_defs_index_json(path: &Path, defs_data: &str) {
     if defs_data.trim().is_empty() {
         let _ = fs::write(path, "{\n}\n");
-        eprintln!("wiki:success: Generated defs index -> {}", path.display());
+        println!("wiki:success: Generated defs index -> {}", path.display());
         return;
     }
 
@@ -757,7 +757,7 @@ fn write_defs_index_json(path: &Path, defs_data: &str) {
     }
     out.push_str("\n}\n");
     let _ = fs::write(path, out);
-    eprintln!("wiki:success: Generated defs index -> {}", path.display());
+    println!("wiki:success: Generated defs index -> {}", path.display());
 }
 
 fn extract_json_str(line: &str, key: &str) -> String {
@@ -809,7 +809,7 @@ fn write_sitemap_xml(ctx: &WikiContext) {
     xml.push_str("</urlset>\n");
     let out_p = ctx.cfg.build_dir.join("sitemap.xml");
     let _ = fs::write(&out_p, xml);
-    eprintln!("wiki:success: Generated sitemap -> {}", out_p.display());
+    println!("wiki:success: Generated sitemap -> {}", out_p.display());
 }
 
 fn resolve_template_path(
@@ -977,20 +977,25 @@ fn file_mtime_size(p: &Path) -> (u64, u64) {
 
 fn compute_tree_fingerprint(paths: &[PathBuf]) -> String {
     let mut acc: Vec<String> = Vec::new();
-    fn walk(p: &Path, acc: &mut Vec<String>) {
+    fn walk(base: &Path, p: &Path, acc: &mut Vec<String>) {
         if p.is_file() {
             let h = fs::read(p).map(|b| fnv1a_hash(&b)).unwrap_or(0);
-            acc.push(format!("{:016x}_{}", h, p.to_string_lossy()));
+            let rel = if base == p {
+                p.file_name().map(Path::new).unwrap_or(p)
+            } else {
+                p.strip_prefix(base).unwrap_or(p)
+            };
+            acc.push(format!("{:016x}_{}", h, rel.to_string_lossy()));
         } else if p.is_dir() {
             if let Ok(entries) = fs::read_dir(p) {
                 for e in entries.flatten() {
-                    walk(&e.path(), acc);
+                    walk(base, &e.path(), acc);
                 }
             }
         }
     }
     for p in paths {
-        walk(p, &mut acc);
+        walk(p, p, &mut acc);
     }
     acc.sort();
     format!("{:016x}", fnv1a_hash(acc.join("\n").as_bytes()))
@@ -1033,6 +1038,7 @@ fn sync_static_if_needed(cfg: &Config, force: bool) {
 
 fn sync_assets_if_needed(cfg: &Config, force: bool) {
     let out_assets = cfg.build_dir.join("_assets");
+    let out_existed = out_assets.is_dir();
     let _ = fs::create_dir_all(&out_assets);
     if !cfg.assets_dir.is_dir() {
         return;
@@ -1040,7 +1046,7 @@ fn sync_assets_if_needed(cfg: &Config, force: bool) {
     let hash_file = cfg.cache_dir.join("rust_assets.hash");
     let fp = compute_dir_stat_fingerprint(&cfg.assets_dir);
     let old_fp = fs::read_to_string(&hash_file).unwrap_or_default();
-    if !force && fp == old_fp.trim() {
+    if !force && out_existed && fp == old_fp.trim() {
         return;
     }
 
@@ -1077,6 +1083,7 @@ fn sync_assets_if_needed(cfg: &Config, force: bool) {
     let fp_after = compute_dir_stat_fingerprint(&cfg.assets_dir);
     let _ = fs::write(&hash_file, format!("{}\n", fp_after));
 }
+
 
 fn collect_convertible_images(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {

@@ -448,6 +448,16 @@ FLAGS:
         esac
     }
 
+    __wiki__.compile() {
+        if [[ ! -f "$_WIKI_DIR/src/main.rs" ]]; then
+            __log "Rust source not found at $_WIKI_DIR/src/main.rs" -t error -l wiki
+            return 1
+        fi
+        mkdir -p "$_WIKI_DIR/bin"
+        __log "Compiling native Rust builder..." -t info -l wiki
+        rustc -C opt-level=3 --edition=2021 "$_WIKI_DIR/src/main.rs" -o "$_WIKI_DIR/bin/builder" && chmod +x "$_WIKI_DIR/bin/builder"
+    }
+
     __wiki__.build() {
         declare -p WIKIS >/dev/null 2>&1 || declare -g -a WIKIS=()
         
@@ -516,21 +526,12 @@ FLAGS:
         [[ -z "$max_jobs" ]] && max_jobs="$(nproc 2>/dev/null || echo 4)"
         (( max_jobs < 1 )) && max_jobs=4
 
-        if [[ -f "$_WIKI_DIR/src/main.rs" ]]; then
-            local src_hash old_src_hash=""
-            src_hash="$(LC_ALL=C cksum "$_WIKI_DIR"/src/*.rs 2>/dev/null)"
-            [[ -f "$_WIKI_DIR/bin/.src_hash" ]] && old_src_hash="$(<"$_WIKI_DIR/bin/.src_hash")"
-            if [[ ! -x "$_WIKI_DIR/bin/builder" || "$src_hash" != "$old_src_hash" ]]; then
-                mkdir -p "$_WIKI_DIR/bin"
-                __log "Compiling native Rust builder..." -t info -l wiki
-                rustc -C opt-level=3 --edition=2021 "$_WIKI_DIR/src/main.rs" -o "$_WIKI_DIR/bin/builder" || return 1
-                printf "%s" "$src_hash" > "$_WIKI_DIR/bin/.src_hash"
-            fi
+        local builder_bin="$_WIKI_DIR/bin/builder"
+        if [[ -f "$builder_bin" && ! -x "$builder_bin" ]]; then
+            chmod +x "$builder_bin" 2>/dev/null || true
         fi
-
-        if [[ ! -x "$_WIKI_DIR/bin/builder" ]]; then
-            __log "Native builder binary not found at $_WIKI_DIR/bin/builder" -t error -l wiki
-            return 1
+        if [[ ! -x "$builder_bin" ]]; then
+            __wiki__.compile || return 1
         fi
 
         mkdir -p "$cache_dir"
@@ -568,8 +569,8 @@ FLAGS:
         [[ -n "$p_name" ]] && builder_args+=(--page "$p_name")
         (( force_rebuild == 1 )) && builder_args+=(--rebuild)
 
-        "$_WIKI_DIR/bin/builder" "${builder_args[@]}"
-    }
+        "$builder_bin" "${builder_args[@]}"
+    }   
 
     __wiki__.serve() {
         local w_name="$1"
