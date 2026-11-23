@@ -448,16 +448,6 @@ FLAGS:
         esac
     }
 
-    __wiki__.compile() {
-        if [[ ! -f "$_WIKI_DIR/src/main.rs" ]]; then
-            __log "Rust source not found at $_WIKI_DIR/src/main.rs" -t error -l wiki
-            return 1
-        fi
-        mkdir -p "$_WIKI_DIR/bin"
-        __log "Compiling native Rust builder..." -t info -l wiki
-        rustc -C opt-level=3 --edition=2021 "$_WIKI_DIR/src/main.rs" -o "$_WIKI_DIR/bin/builder" && chmod +x "$_WIKI_DIR/bin/builder"
-    }
-
     __wiki__.build() {
         declare -p WIKIS >/dev/null 2>&1 || declare -g -a WIKIS=()
         
@@ -572,16 +562,39 @@ FLAGS:
         "$builder_bin" "${builder_args[@]}"
     }   
 
+    __wiki__.compile() {
+        mkdir -p "$_WIKI_DIR/bin"
+        if [[ -f "$_WIKI_DIR/src/main.rs" ]]; then
+            __log "Compiling native Rust builder..." -t info -l wiki
+            rustc -C opt-level=3 --edition=2021 "$_WIKI_DIR/src/main.rs" -o "$_WIKI_DIR/bin/builder" && chmod +x "$_WIKI_DIR/bin/builder" || return 1
+        fi
+        if [[ -f "$_WIKI_DIR/src/server.rs" ]]; then
+            __log "Compiling native Rust server..." -t info -l wiki
+            rustc -C opt-level=3 --edition=2021 "$_WIKI_DIR/src/server.rs" -o "$_WIKI_DIR/bin/server" && chmod +x "$_WIKI_DIR/bin/server" || return 1
+        fi
+    }
+
     __wiki__.serve() {
         local w_name="$1"
         shift || true
-        local port="8080"
+        local port="8080" watch=0 open_browser=0 o_dist="" o_cache="" o_jobs=""
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 -p|--port) port="$2"; shift 2 ;;
+                -w|--watch) watch=1; shift ;;
+                -o|--open) open_browser=1; shift ;;
+                -d|--dist)
+                    mkdir -p "$2"
+                    o_dist="$(cd "$2" && pwd)"
+                    shift 2 ;;
+                -C|--cache)
+                    if [[ "$2" == /* ]]; then o_cache="$2"; else o_cache="$PWD/$2"; fi
+                    shift 2 ;;
+                -j|--jobs) o_jobs="$2"; shift 2 ;;
                 *) shift ;;
             esac
         done
+
         if [[ -z "$w_name" ]]; then
             __log "No wiki specified." -t error -l wiki
             return 1
@@ -591,54 +604,104 @@ FLAGS:
             __log "Wiki '$w_name' is not configured." -t error -l wiki
             return 1
         fi
-        local BUILDDIR=""
-        local IFS=',' pair k v
+
+        local W_PATH="" SOURCEDIR="" BUILDDIR="" TEMPLATEDIR="" STATICDIR="" ASSETSDIR="" domain=""
+        local OIFS="$IFS"; IFS=','
+        local pair k v
         for pair in $w_config; do
             k="${pair%%:*}" v="${pair#*:}"
-            [[ "$k" == "dist" ]] && BUILDDIR="$v"
+            case "$k" in
+                path) W_PATH="$v" ;;
+                content) SOURCEDIR="$v" ;;
+                dist) BUILDDIR="$v" ;;
+                template) TEMPLATEDIR="$v" ;;
+                static) STATICDIR="$v" ;;
+                assets) ASSETSDIR="$v" ;;
+                domain|url) domain="$v" ;;
+            esac
         done
-        if [[ -z "$BUILDDIR" || ! -d "$BUILDDIR" ]]; then
-            __log "Wiki dist directory not found for '$w_name'." -t error -l wiki
-            return 1
+        IFS="$OIFS"
+
+        [[ -n "$o_dist" ]] && BUILDDIR="$o_dist"
+
+        local server_bin="$_WIKI_DIR/bin/server"
+        [[ -f "$server_bin" && ! -x "$server_bin" ]] && chmod +x "$server_bin" 2>/dev/null || true
+        if [[ ! -x "$server_bin" ]]; then
+            if [[ -f "$_WIKI_DIR/src/server.rs" ]]; then
+                mkdir -p "$_WIKI_DIR/bin"
+                __log "Compiling native Rust server..." -t info -l wiki
+                rustc -C opt-level=3 --edition=2021 "$_WIKI_DIR/src/server.rs" -o "$server_bin" && chmod +x "$server_bin" || return 1
+            else
+                __log "Server binary not found at $server_bin" -t error -l wiki
+                return 1
+            fi
         fi
-        __log "Serving '$w_name' ($BUILDDIR) on port $port... (Press Ctrl+C to stop)" -t info -l wiki
-        if command -v "$_WIKI_DIR/bin/server" >/dev/null 2>&1; then
-            (cd "$BUILDDIR" && "$_WIKI_DIR/bin/server" "$port")
-        elif command -v nc >/dev/null 2>&1; then
-            __log "Server binary not found. Falling back to basic 'nc' server (Single-threaded)." -t info -l wiki
-            (
-                cd "$BUILDDIR" || exit 1
-                local pipe="/tmp/wiki_serve_$$"
-                trap 'rm -f "$pipe"' EXIT INT TERM
-                mkfifo "$pipe"
-                local nc_cmd="nc -l $port"
-                nc -h 2>&1 | grep -q '\-p' && nc_cmd="nc -l -p $port"
-                while true; do
-                    eval "$nc_cmd" < "$pipe" | (
-                        read -r line
-                        line="${line%%$'\r'}"
-                        local req_path="${line#* }"
-                        req_path="${req_path%% *}"
-                        [[ "$req_path" == "/" || -z "$req_path" ]] && req_path="/index.html"
-                        local target=".${req_path}"
-                        if [[ -f "$target" ]]; then
-                            local mime="text/plain"
-                            [[ "$target" == *".html" ]] && mime="text/html"
-                            [[ "$target" == *".css" ]] && mime="text/css"
-                            [[ "$target" == *".js" ]] && mime="application/javascript"
-                            echo -ne "HTTP/1.1 200 OK\r\nContent-Type: $mime\r\n\r\n" > "$pipe"
-                            cat "$target" > "$pipe"
-                        else
-                            echo -ne "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\n\r\n<h1>404 Not Found</h1>" > "$pipe"
-                        fi
-                    )
+
+        if (( watch == 1 )); then
+            local builder_bin="$_WIKI_DIR/bin/builder"
+            [[ -f "$builder_bin" && ! -x "$builder_bin" ]] && chmod +x "$builder_bin" 2>/dev/null || true
+            if [[ ! -x "$builder_bin" ]]; then
+                __wiki__.compile || return 1
+            fi
+
+            local serve_dir="$BUILDDIR"
+            if [[ -z "$o_dist" && -n "$W_PATH" ]]; then
+                serve_dir="$W_PATH/.watch"
+            fi
+            local cache_dir="${o_cache:-${W_PATH:-$PWD}/.cache/watch}"
+            local stage_dir="$cache_dir/dist"
+            local max_jobs="${o_jobs:-$(nproc 2>/dev/null || echo 4)}"
+            (( max_jobs < 1 )) && max_jobs=4
+
+            mkdir -p "$cache_dir" "$serve_dir" "$stage_dir"
+            local cfg_tmp="$cache_dir/omni_env.tsv"
+            {
+                for k in "${!WIKI_BLOCKS[@]}"; do printf "BLOCK\t%s\t%s\n" "$k" "${WIKI_BLOCKS[$k]}"; done
+                for k in "${!WIKI_AUTHORS[@]}"; do
+                    [[ "$k" == "${w_name}::"* ]] && printf "AUTHOR\t%s\t%s\n" "${k#${w_name}::}" "${WIKI_AUTHORS[$k]}"
                 done
+                for k in "${!WIKI_TEMPLATE_VARS[@]}"; do printf "TMPL\t%s\t%s\n" "$k" "${WIKI_TEMPLATE_VARS[$k]}"; done
+                for k in "${!WIKI_REFS[@]}"; do
+                    local rv="${WIKI_REFS[$k]}"
+                    if [[ "$rv" == http://* || "$rv" == https://* ]]; then
+                        printf "REF\t%s\t%s\n" "$k" "$rv"
+                    fi
+                done
+                if declare -p WIKI_FEATURED >/dev/null 2>&1; then
+                    printf "FEATURED\t%s\n" "${WIKI_FEATURED[*]}"
+                fi
+            } > "$cfg_tmp"
+
+            local -a srv_args=(
+                --watch
+                --port "$port"
+                --dir "$serve_dir"
+                --builder "$builder_bin"
+                --wiki "$w_name"
+                --wiki-dir "$_WIKI_DIR"
+                --source "$SOURCEDIR"
+                --templates "$TEMPLATEDIR"
+                --static "$STATICDIR"
+                --assets "$ASSETSDIR"
+                --cache "$cache_dir"
+                --stage "$stage_dir"
+                --config "$cfg_tmp"
+                --jobs "$max_jobs"
             )
+            [[ -n "$domain" ]] && srv_args+=(--domain "$domain")
+            (( open_browser == 1 )) && srv_args+=(--open)
+
+            "$server_bin" "${srv_args[@]}"
         else
-            __log "neither server bin nor nc was found." -t error -l wiki
-            return 1
+            if [[ -z "$BUILDDIR" || ! -d "$BUILDDIR" ]]; then
+                __log "Wiki dist directory not found for '$w_name'. Try 'wiki build $w_name' or 'wiki serve $w_name --watch'." -t error -l wiki
+                return 1
+            fi
+            local -a srv_args=(--port "$port" --dir "$BUILDDIR")
+            (( open_browser == 1 )) && srv_args+=(--open)
+            "$server_bin" "${srv_args[@]}"
         fi
-    }
+    }   
 
     wiki() {
         local reset_patsub=0
@@ -686,12 +749,12 @@ FLAGS:
                 if [[ "${COMP_CWORD}" == 2 ]]; then
                     declare -p WIKIS >/dev/null 2>&1 && COMPREPLY=( $(compgen -W "${WIKIS[*]}" -- "$cur") )
                 elif [[ "$base_cmd" == "serve" && "$cur" == -* ]]; then
-                    COMPREPLY=( $(compgen -W "-p --port" -- "$cur") )
+                    COMPREPLY=( $(compgen -W "--port --watch --open --dist --cache --jobs" -- "$cur") )
                 fi
-                ;;
+                ;; 
             new|set)
                 if [[ "$cur" == -* ]]; then
-                    COMPREPLY=( $(compgen -W "-p --path -c --contents -d --dist -t --templates --template -s --static -a --assets -D --domain --url" -- "$cur") )
+                    COMPREPLY=( $(compgen -W "--path --contents --dist --templates --template --static --assets -domain --url" -- "$cur") )
                 elif [[ "${COMP_CWORD}" == 2 ]]; then
                     declare -p WIKIS >/dev/null 2>&1 && COMPREPLY=( $(compgen -W "${WIKIS[*]}" -- "$cur") )
                 fi
@@ -704,11 +767,11 @@ FLAGS:
                     declare -p WIKIS >/dev/null 2>&1 && COMPREPLY=( $(compgen -W "${WIKIS[*]}" -- "$cur") )
                 elif [[ "$subcmd" == "new" || "$subcmd" == "set" ]]; then
                     if [[ "$cur" == -* ]]; then
-                        COMPREPLY=( $(compgen -W "-p --page -t --template" -- "$cur") )
+                        COMPREPLY=( $(compgen -W "--page --template" -- "$cur") )
                     fi
                 elif [[ "$subcmd" == "rm" ]]; then
                     if [[ "$cur" == -* ]]; then
-                        COMPREPLY=( $(compgen -W "-p --page" -- "$cur") )
+                        COMPREPLY=( $(compgen -W "--page" -- "$cur") )
                     elif [[ "$prev" == "-p" || "$prev" == "--page" ]]; then
                         local w_name="${COMP_WORDS[3]}"
                         declare -p WIKI_PAGES >/dev/null 2>&1 && COMPREPLY=( $(compgen -W "${WIKI_PAGES[$w_name]//,/ }" -- "$cur") )
@@ -723,7 +786,7 @@ FLAGS:
                     declare -p WIKI_TEMPLATES >/dev/null 2>&1 && COMPREPLY=( $(compgen -W "${WIKI_TEMPLATES[*]}" -- "$cur") )
                 elif [[ "$subcmd" == "new" || "$subcmd" == "set" ]]; then
                     if [[ "$cur" == -* ]]; then
-                        COMPREPLY=( $(compgen -W "-p --path" -- "$cur") )
+                        COMPREPLY=( $(compgen -W "--path" -- "$cur") )
                     fi
                 fi
                 ;;
@@ -733,7 +796,7 @@ FLAGS:
                     COMPREPLY=( $(compgen -W "ls new set rm" -- "$cur") )
                 elif [[ "$subcmd" == "new" || "$subcmd" == "set" ]]; then
                     if [[ "$cur" == -* ]]; then
-                        COMPREPLY=( $(compgen -W "-w --wiki -e --env" -- "$cur") )
+                        COMPREPLY=( $(compgen -W "--wiki --env" -- "$cur") )
                     fi
                 fi
                 ;;
@@ -743,7 +806,7 @@ FLAGS:
                     COMPREPLY=( $(compgen -W "ls new set rm" -- "$cur") )
                 elif [[ "$subcmd" == "new" || "$subcmd" == "set" ]]; then
                     if [[ "$cur" == -* ]]; then
-                        COMPREPLY=( $(compgen -W "-w --wiki -e --env -t --topic -v --value" -- "$cur") )
+                        COMPREPLY=( $(compgen -W "--wiki --env --topic --value" -- "$cur") )
                     fi
                 fi
                 ;;
@@ -755,7 +818,7 @@ FLAGS:
                     declare -p WIKI_BLOCKS >/dev/null 2>&1 && COMPREPLY=( $(compgen -W "${!WIKI_BLOCKS[*]}" -- "$cur") )
                 elif [[ "$subcmd" == "new" || "$subcmd" == "set" ]]; then
                     if [[ "$cur" == -* ]]; then
-                        COMPREPLY=( $(compgen -W "-c --class" -- "$cur") )
+                        COMPREPLY=( $(compgen -W "--class" -- "$cur") )
                     fi
                 fi
                 ;;
@@ -765,7 +828,7 @@ FLAGS:
                     COMPREPLY=( $(compgen -W "ls new set rm" -- "$cur") )
                 elif [[ "$subcmd" == "new" || "$subcmd" == "set" ]]; then
                     if [[ "$cur" == -* ]]; then
-                        COMPREPLY=( $(compgen -W "-w --wiki -n --name -u --url" -- "$cur") )
+                        COMPREPLY=( $(compgen -W "--wiki --name --url" -- "$cur") )
                     fi
                 fi
                 ;;
@@ -780,7 +843,7 @@ FLAGS:
                         declare -p WIKIS >/dev/null 2>&1 && COMPREPLY=( $(compgen -W "${WIKIS[*]}" -- "$cur") )
                     fi
                 elif [[ "$cur" == -* ]]; then
-                    COMPREPLY=( $(compgen -W "-c --contents -d --dist -t --templates --template -s --static -a --assets -C --cache -j --jobs --rebuild" -- "$cur") )
+                    COMPREPLY=( $(compgen -W "--contents --dist --templates --template --static --assets --cache --jobs --rebuild" -- "$cur") )
                 fi
                 ;;
         esac
