@@ -1,4 +1,3 @@
-
 mod blocks;
 mod diagram;
 mod model;
@@ -33,6 +32,7 @@ fn main() {
 
     let mut force_rebuild = cfg.force_rebuild;
 
+    // 1. Check template + builder binary content fingerprint
     let tmpl_hash = compute_tree_fingerprint(&[
         cfg.template_dir.clone(),
         env::current_exe().unwrap_or_default(),
@@ -45,7 +45,10 @@ fn main() {
     }
 
     if cfg.target_page.is_empty() && force_rebuild {
-        eprintln!("wiki:info: Cleaning and preparing environment for '{}'...", cfg.wiki_name);
+        eprintln!(
+            "wiki:info: Cleaning and preparing environment for '{}'...",
+            cfg.wiki_name
+        );
         if let Ok(entries) = fs::read_dir(&cfg.build_dir) {
             let cache_name = cfg.cache_dir.file_name();
             for entry in entries.flatten() {
@@ -345,16 +348,20 @@ fn main() {
         let queue = Mutex::new(render_targets.iter());
         std::thread::scope(|s| {
             for _ in 0..jobs {
-                s.spawn(|| loop {
+                let q_ref = &queue;
+                let ctx_ref = &ctx;
+                let tmpl_ref = &page_tmpl_paths;
+                let out_ref = &rendered_outputs;
+                s.spawn(move || loop {
                     let next_slug = {
-                        let mut q = queue.lock().unwrap();
+                        let mut q = q_ref.lock().unwrap();
                         q.next().cloned()
                     };
                     let Some(slug) = next_slug else { break };
-                    if let Some(tmpl_p) = page_tmpl_paths.get(&slug) {
-                        if let Some(out) = render_single_page(&ctx, &slug, tmpl_p) {
-                            write_page_idx_cache(&ctx.cfg.cache_dir, &out);
-                            rendered_outputs.lock().unwrap().push(out);
+                    if let Some(tmpl_p) = tmpl_ref.get(&slug) {
+                        if let Some(out) = render_single_page(ctx_ref, &slug, tmpl_p) {
+                            write_page_idx_cache(&ctx_ref.cfg.cache_dir, &out);
+                            out_ref.lock().unwrap().push(out);
                         }
                     }
                 });
@@ -513,7 +520,7 @@ fn strip_html_tags(html: &str) -> String {
 }
 
 fn prewarm_latex_parallel(ctx: &WikiContext, render_targets: &[String]) {
-    let mut tasks: Vec<(bool, String)> = Vec::new(); // (inline, expr)
+    let mut tasks: Vec<(bool, String)> = Vec::new();
     let mut seen: HashSet<(bool, String)> = HashSet::new();
 
     {
@@ -546,16 +553,18 @@ fn prewarm_latex_parallel(ctx: &WikiContext, render_targets: &[String]) {
     let q = Mutex::new(tasks.into_iter());
     std::thread::scope(|s| {
         for _ in 0..jobs {
-            s.spawn(|| loop {
-                let item = q.lock().unwrap().next();
+            let q_ref = &q;
+            let ctx_ref = ctx;
+            s.spawn(move || loop {
+                let item = q_ref.lock().unwrap().next();
                 let Some((inline, expr)) = item else { break };
-                if let Some(svg) = render_latex_expr(&ctx.cfg.wiki_dir, &expr, inline) {
+                if let Some(svg) = render_latex_expr(&ctx_ref.cfg.wiki_dir, &expr, inline) {
                     let key = if inline {
                         format!("inline:{}", expr)
                     } else {
                         format!("block:{}", expr)
                     };
-                    ctx.latex_cache.write().unwrap().insert(key, svg);
+                    ctx_ref.latex_cache.write().unwrap().insert(key, svg);
                 }
             });
         }
@@ -563,7 +572,7 @@ fn prewarm_latex_parallel(ctx: &WikiContext, render_targets: &[String]) {
 }
 
 fn extract_latex_from_source<F: FnMut(bool, &str)>(text: &str, cb: &mut F) {
-    let mut in_tex = 0u8; // 1=block.tex, 2=$$
+    let mut in_tex = 0u8;
     let mut tex_buf = String::new();
 
     for raw_line in text.lines() {
@@ -629,7 +638,6 @@ fn extract_latex_from_source<F: FnMut(bool, &str)>(text: &str, cb: &mut F) {
 
         if raw_line.contains('$') {
             let mut s = raw_line.replace("$$", "");
-            // Strip inline backtick spans first
             while let Some(i1) = s.find('`') {
                 let rest = &s[i1 + 1..];
                 if let Some(i2) = rest.find('`') {
@@ -971,8 +979,8 @@ fn compute_tree_fingerprint(paths: &[PathBuf]) -> String {
     let mut acc: Vec<String> = Vec::new();
     fn walk(p: &Path, acc: &mut Vec<String>) {
         if p.is_file() {
-            let (m, s) = file_mtime_size(p);
-            acc.push(format!("{}_{}_{}", m, s, p.to_string_lossy()));
+            let h = fs::read(p).map(|b| fnv1a_hash(&b)).unwrap_or(0);
+            acc.push(format!("{:016x}_{}", h, p.to_string_lossy()));
         } else if p.is_dir() {
             if let Ok(entries) = fs::read_dir(p) {
                 for e in entries.flatten() {
@@ -988,13 +996,33 @@ fn compute_tree_fingerprint(paths: &[PathBuf]) -> String {
     format!("{:016x}", fnv1a_hash(acc.join("\n").as_bytes()))
 }
 
+fn compute_dir_stat_fingerprint(dir: &Path) -> String {
+    let mut acc: Vec<String> = Vec::new();
+    fn walk(base: &Path, p: &Path, acc: &mut Vec<String>) {
+        if p.is_file() {
+            let (m, s) = file_mtime_size(p);
+            let rel = p.strip_prefix(base).unwrap_or(p);
+            acc.push(format!("{}_{}_{}", m, s, rel.to_string_lossy()));
+        } else if p.is_dir() {
+            if let Ok(entries) = fs::read_dir(p) {
+                for e in entries.flatten() {
+                    walk(base, &e.path(), acc);
+                }
+            }
+        }
+    }
+    walk(dir, dir, &mut acc);
+    acc.sort();
+    format!("{:016x}", fnv1a_hash(acc.join("\n").as_bytes()))
+}
+
 fn sync_static_if_needed(cfg: &Config, force: bool) {
     if !cfg.static_dir.is_dir() {
         return;
     }
     let out_static = cfg.build_dir.join("_static");
     let hash_file = cfg.cache_dir.join("rust_static.hash");
-    let fp = compute_tree_fingerprint(&[cfg.static_dir.clone()]);
+    let fp = compute_dir_stat_fingerprint(&cfg.static_dir);
     let old_fp = fs::read_to_string(&hash_file).unwrap_or_default();
     if !force && fp == old_fp.trim() && out_static.is_dir() {
         return;
@@ -1010,7 +1038,7 @@ fn sync_assets_if_needed(cfg: &Config, force: bool) {
         return;
     }
     let hash_file = cfg.cache_dir.join("rust_assets.hash");
-    let fp = compute_tree_fingerprint(&[cfg.assets_dir.clone()]);
+    let fp = compute_dir_stat_fingerprint(&cfg.assets_dir);
     let old_fp = fs::read_to_string(&hash_file).unwrap_or_default();
     if !force && fp == old_fp.trim() {
         return;
@@ -1046,7 +1074,7 @@ fn sync_assets_if_needed(cfg: &Config, force: bool) {
     }
 
     let _ = copy_dir_recursive(&cfg.assets_dir, &out_assets);
-    let fp_after = compute_tree_fingerprint(&[cfg.assets_dir.clone()]);
+    let fp_after = compute_dir_stat_fingerprint(&cfg.assets_dir);
     let _ = fs::write(&hash_file, format!("{}\n", fp_after));
 }
 
@@ -1137,17 +1165,21 @@ fn save_meta_cache(path: &Path, ctx: &WikiContext) {
         let vars_enc: Vec<String> = pm
             .vars
             .iter()
-            .map(|(k, v)| format!("{}\x1D{}", k, v.replace(['\n', '\r', '\x1F', '\x1E', '\x1D'], " ")))
+            .map(|(k, v)| {
+                format!(
+                    "{}\x1D{}",
+                    k,
+                    v.replace(['\n', '\r', '\x1F', '\x1E', '\x1D'], " ")
+                )
+            })
             .collect();
 
-        // Collect refs belonging to this page
         let prefix_target = format!("{}:", p);
         let mut page_refs: Vec<String> = Vec::new();
         for (rk, rv) in &ctx.refs {
             if !rk.contains("::") {
                 continue;
             }
-            // Only store canonical unprefixed topic::ref_key entries
             if rk.matches("::").count() == 1 && rv.starts_with(&prefix_target) {
                 if let Some((btype, rkey)) = rk.split_once("::") {
                     let anc = &rv[prefix_target.len()..];

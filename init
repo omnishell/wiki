@@ -517,17 +517,14 @@ FLAGS:
         (( max_jobs < 1 )) && max_jobs=4
 
         if [[ -f "$_WIKI_DIR/src/main.rs" ]]; then
-            local need_compile=0 rs_f
-            [[ ! -x "$_WIKI_DIR/bin/builder" ]] && need_compile=1
-            if (( need_compile == 0 )); then
-                for rs_f in "$_WIKI_DIR"/src/*.rs; do
-                    [[ "$rs_f" -nt "$_WIKI_DIR/bin/builder" ]] && { need_compile=1; break; }
-                done
-            fi
-            if (( need_compile == 1 )); then
+            local src_hash old_src_hash=""
+            src_hash="$(LC_ALL=C cksum "$_WIKI_DIR"/src/*.rs 2>/dev/null)"
+            [[ -f "$_WIKI_DIR/bin/.src_hash" ]] && old_src_hash="$(<"$_WIKI_DIR/bin/.src_hash")"
+            if [[ ! -x "$_WIKI_DIR/bin/builder" || "$src_hash" != "$old_src_hash" ]]; then
                 mkdir -p "$_WIKI_DIR/bin"
                 __log "Compiling native Rust builder..." -t info -l wiki
                 rustc -C opt-level=3 --edition=2021 "$_WIKI_DIR/src/main.rs" -o "$_WIKI_DIR/bin/builder" || return 1
+                printf "%s" "$src_hash" > "$_WIKI_DIR/bin/.src_hash"
             fi
         fi
 
@@ -572,7 +569,7 @@ FLAGS:
         (( force_rebuild == 1 )) && builder_args+=(--rebuild)
 
         "$_WIKI_DIR/bin/builder" "${builder_args[@]}"
-    }   
+    }
 
     __wiki__.serve() {
         local w_name="$1"

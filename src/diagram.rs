@@ -344,22 +344,21 @@ pub fn render_diagram(
                 }
             }
 
-            let mut a_name = String::new();
             let mut src = String::new();
             let mut tgt = String::new();
-            if positional.len() >= 3 {
-                a_name = positional[0].clone();
+            let a_name = if positional.len() >= 3 {
                 src = positional[1].clone();
                 tgt = positional[2].clone();
+                positional[0].clone()
             } else if positional.len() == 2 {
-                a_name = format!("{}_{}", cmd, arrows.len());
                 src = positional[0].clone();
                 tgt = positional[1].clone();
+                format!("{}_{}", cmd, arrows.len())
             } else if positional.len() == 1 {
-                a_name = positional[0].clone();
+                positional[0].clone()
             } else {
-                a_name = format!("{}_{}", cmd, arrows.len());
-            }
+                format!("{}_{}", cmd, arrows.len())
+            };
 
             let mut a_format = "normal".to_string();
             let mut a_angle = String::new();
