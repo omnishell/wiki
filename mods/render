@@ -593,7 +593,7 @@ __render__() {
                                     c_i = index(in_r, ":")
                                     if (c_i > 1) {
                                         t_top = substr(in_r, 1, c_i - 1)
-                                        if (t_top ~ /^[a-zA-Z0-9_-]+$/ && t_top != "page" && t_top != "block") {
+                                        if (t_top ~ /^[a-zA-Z0-9_-]+$/ && t_top != "page" && t_top != "block" && t_top != "diagram") {
                                             t_rest = substr(in_r, c_i + 1)
                                             c_i2 = index(t_rest, ":")
                                             t_ref = (c_i2 > 0) ? substr(t_rest, 1, c_i2 - 1) : t_rest
@@ -842,6 +842,7 @@ __render__() {
         [[ -n "${WIKI_SEARCH_JS:-}" ]] && rendered="${rendered//%%WIKI_SEARCH_CONFIG%%/$WIKI_SEARCH_JS}"
         printf "%s" "$rendered" > "$out_path"
         __log "Rendered -> $out_path" -t success -l wiki
-    }    
+    }
+
 
 }

@@ -296,7 +296,7 @@ __blocks__() {
                         inner="${inner#"${inner%%[![:space:]]*}"}"
                         inner="${inner%"${inner##*[![:space:]]}"}"
                         t_topic="${inner%%:*}"
-                        if [[ -n "$t_topic" && -z "${t_topic//[a-zA-Z0-9_-]/}" && "$t_topic" != "page" && "$t_topic" != "block" ]]; then
+                        if [[ -n "$t_topic" && -z "${t_topic//[a-zA-Z0-9_-]/}" && "$t_topic" != "page" && "$t_topic" != "block" && "$t_topic" != "diagram" ]]; then
                             t_rest="${inner#*:}"
                             t_ref="${t_rest%%:*}"
                             t_ref="${t_ref#"${t_ref%%[![:space:]]*}"}"
@@ -348,8 +348,8 @@ __blocks__() {
             BLOCK_DISPLAY_VALS["related"]="$new_rel"
             BLOCK_DISPLAY_KEYS["related"]="__refs__"
         fi
-    }
-    
+    }    
+
 
     __block_def() {
         __block_core "$1" "$2"
@@ -601,6 +601,7 @@ __blocks__() {
         fi
     }   
    
+    
     __block_diagram() {
         local -a _local_diag_buf=()
         local cls_prefix="diagram"
@@ -615,6 +616,8 @@ __blocks__() {
         if (( ${#_local_diag_buf[@]} == 0 )); then return; fi
         local -a node_lines=() arrow_lines=() expanded_diag_lines=()
         local diagram_caption=""
+        local diagram_raw_id=""
+        local diagram_ctx="${BLOCK_VALS[__context__]:-${BLOCK_VALS[context]:-}}"
         local line old_ifs="$IFS"
 
         for line in "${_local_diag_buf[@]}"; do
@@ -635,10 +638,28 @@ __blocks__() {
         done
 
         for line in "${expanded_diag_lines[@]}"; do
-            if [[ "$line" =~ ^[[:space:]]*::[[:space:]]*caption[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+            local d_line="$line"
+            d_line="${d_line#"${d_line%%[![:space:]]*}"}"
+            while [[ "$d_line" == "::"* ]]; do
+                local next_dl="${d_line#::}"
+                next_dl="${next_dl#"${next_dl%%[![:space:]]*}"}"
+                if [[ "$next_dl" == "::"* ]]; then
+                    d_line="$next_dl"
+                else
+                    break
+                fi
+            done
+
+            if [[ "$d_line" =~ ^::[[:space:]]*(__id__|id)[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+                __diagram_strip_quotes_r "${BASH_REMATCH[2]}"
+                diagram_raw_id="$REPLY"
+            elif [[ "$d_line" =~ ^::[[:space:]]*(__context__|context)[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+                __diagram_strip_quotes_r "${BASH_REMATCH[2]}"
+                diagram_ctx="$REPLY"
+            elif [[ "$d_line" =~ ^::[[:space:]]*caption[[:space:]]*:[[:space:]]*(.*)$ ]]; then
                 __diagram_strip_quotes_r "${BASH_REMATCH[1]}"
                 diagram_caption="$REPLY"
-            elif [[ "$line" =~ ^[[:space:]]*::[[:space:]]*(node|term)[[:space:]]*:?[[:space:]]*(.*)$ ]]; then
+            elif [[ "$d_line" =~ ^::[[:space:]]*(node|term)[[:space:]]*:?[[:space:]]*(.*)$ ]]; then
                 local raw_content="${BASH_REMATCH[2]}"
                 local -a tokens=()
                 __diagram_split_props "$raw_content" tokens
@@ -647,7 +668,7 @@ __blocks__() {
                 local name="${tokens[0]}"
                 __diagram_strip_quotes_r "$name"; name="$REPLY"
 
-                local x=0 y=0 border="rounded" bg="default" n_class="" n_text=""
+                local x=0 y=0 border="none" bg="default" n_class="" n_text=""
                 local x_set=0 y_set=0
                 local idx token
                 for (( idx=1; idx<${#tokens[@]}; idx++ )); do
@@ -655,6 +676,7 @@ __blocks__() {
                     if [[ "$token" == *=* ]]; then
                         local k="${token%%=*}"
                         local v="${token#*=}"
+                        k="${k#"${k%%[![:space:]]*}"}"; k="${k%"${k##*[![:space:]]}"}"
                         __diagram_strip_quotes_r "$v"; v="$REPLY"
                         if [[ "$k" == "x" ]]; then x="$v"; x_set=1
                         elif [[ "$k" == "y" ]]; then y="$v"; y_set=1
@@ -670,6 +692,8 @@ __blocks__() {
                             if (( x_set == 0 )); then x="$clean_tok"; x_set=1
                             elif (( y_set == 0 )); then y="$clean_tok"; y_set=1
                             fi
+                        elif [[ "$clean_tok" == "none" || "$clean_tok" == "rounded" || "$clean_tok" == "squared" ]]; then
+                            border="$clean_tok"
                         fi
                     fi
                 done
@@ -695,13 +719,22 @@ __blocks__() {
                 done
                 local line_count=${#text_lines[@]}
                 (( line_count == 0 )) && line_count=1
-                local w=$(( (max_len * 85 + 5) / 10 + tex_w + 28 ))
-                (( w < 72 )) && w=72
-                local h=$(( line_count * 18 + 18 ))
-                (( has_tex == 1 && h < 42 )) && h=42
+
+                local w h
+                if [[ "$border" == "none" || -z "$border" ]]; then
+                    w=$(( (max_len * 85 + 5) / 10 + tex_w + 10 ))
+                    (( w < 18 )) && w=18
+                    h=$(( line_count * 18 + 6 ))
+                    (( has_tex == 1 && h < 26 )) && h=26
+                else
+                    w=$(( (max_len * 85 + 5) / 10 + tex_w + 28 ))
+                    (( w < 72 )) && w=72
+                    h=$(( line_count * 18 + 18 ))
+                    (( has_tex == 1 && h < 42 )) && h=42
+                fi
 
                 node_lines+=("NODE"$'\x1f'"$name"$'\x1f'"$x"$'\x1f'"$y"$'\x1f'"$w"$'\x1f'"$h"$'\x1f'"$border"$'\x1f'"$bg"$'\x1f'"$n_class"$'\x1f'"$has_tex"$'\x1f'"$display_text"$'\x1f'"$text_html")
-            elif [[ "$line" =~ ^[[:space:]]*::[[:space:]]*(arrow|2-arrow)[[:space:]]*:?[[:space:]]*(.*)$ ]]; then
+            elif [[ "$d_line" =~ ^::[[:space:]]*(arrow|2-arrow)[[:space:]]*:?[[:space:]]*(.*)$ ]]; then
                 local a_type="${BASH_REMATCH[1]}"
                 local raw_content="${BASH_REMATCH[2]}"
                 local -a tokens=()
@@ -742,6 +775,7 @@ __blocks__() {
                     if [[ "$token" == *=* ]]; then
                         local k="${token%%=*}"
                         local v="${token#*=}"
+                        k="${k#"${k%%[![:space:]]*}"}"; k="${k%"${k##*[![:space:]]}"}"
                         if [[ "$k" == "label" ]]; then
                             if [[ "$v" == ^* ]]; then a_label_pos="above"; v="${v#^}"
                             elif [[ "$v" == _* ]]; then a_label_pos="below"; v="${v#_}"
@@ -776,7 +810,9 @@ __blocks__() {
                     fi
                 done
                 [[ "$a_format" == "diag" || "$a_format" == "diagonal" ]] && a_format="straight"
+                local a_size_explicit=1
                 if [[ -z "$a_size" ]]; then
+                    a_size_explicit=0
                     if [[ "$a_type" == "2-arrow" ]]; then a_size="0.6"; else a_size="0.9"; fi
                 fi
 
@@ -807,7 +843,7 @@ __blocks__() {
                     (( has_tex == 1 && label_h < 28 )) && label_h=28
                 fi
 
-                arrow_lines+=("ARROW"$'\x1f'"$a_type"$'\x1f'"$a_name"$'\x1f'"$src"$'\x1f'"$tgt"$'\x1f'"$has_coords"$'\x1f'"$a_x"$'\x1f'"$a_y"$'\x1f'"$a_format"$'\x1f'"$l_style"$'\x1f'"$a_angle"$'\x1f'"$a_color"$'\x1f'"$a_size"$'\x1f'"$a_class"$'\x1f'"$a_label_pos"$'\x1f'"$has_tex"$'\x1f'"$a_label"$'\x1f'"$label_html"$'\x1f'"$label_w"$'\x1f'"$label_h"$'\x1f'"$a_loop_dir")
+                arrow_lines+=("ARROW"$'\x1f'"$a_type"$'\x1f'"$a_name"$'\x1f'"$src"$'\x1f'"$tgt"$'\x1f'"$has_coords"$'\x1f'"$a_x"$'\x1f'"$a_y"$'\x1f'"$a_format"$'\x1f'"$l_style"$'\x1f'"$a_angle"$'\x1f'"$a_color"$'\x1f'"$a_size"$'\x1f'"$a_class"$'\x1f'"$a_label_pos"$'\x1f'"$has_tex"$'\x1f'"$a_label"$'\x1f'"$label_html"$'\x1f'"$label_w"$'\x1f'"$label_h"$'\x1f'"$a_loop_dir"$'\x1f'"$a_size_explicit")
             fi
         done
 
@@ -815,6 +851,23 @@ __blocks__() {
 
         ((page_diagram_count++))
         local diagram_id="${cls_prefix}-${page_diagram_count}"
+        if [[ -n "$diagram_raw_id" ]]; then
+            local diag_clean_id="" diag_ref_key=""
+            __slugify_r "$diagram_raw_id"
+            diag_clean_id="$REPLY"
+            diag_ref_key="$diag_clean_id"
+            if [[ -n "$diagram_ctx" && "$diagram_raw_id" != *.* ]]; then
+                __slugify_r "${diagram_ctx}.${diagram_raw_id}"
+                diag_ref_key="$REPLY"
+            fi
+            local diag_anchor_slug="${diag_ref_key//[\/.]/-}"
+            diagram_id="block-diagram-${diag_anchor_slug}"
+            if [[ -n "${w_name:-}" ]]; then
+                WIKI_REFS["diagram::${diag_ref_key}"]="${pagename}:${diagram_id}"
+                WIKI_REFS["${w_name}::${ENV:-}::diagram::${diag_ref_key}"]="${pagename}:${diagram_id}"
+            fi
+        fi
+
         local safe_caption="${diagram_caption//&/&amp;}"
         safe_caption="${safe_caption//</&lt;}"
         safe_caption="${safe_caption//>/&gt;}"
@@ -831,7 +884,7 @@ __blocks__() {
             arrow_count = 0
             min_x = 999999; max_x = -999999
             min_y = 999999; max_y = -999999
-            max_node_w = 72; max_node_h = 36
+            max_node_w = 0; max_node_h = 0
         }
         $1 == "NODE" {
             node_count++
@@ -882,6 +935,7 @@ __blocks__() {
             arr_label_w[arrow_count] = $19 + 0
             arr_label_h[arrow_count] = $20 + 0
             arr_loop_dir[arrow_count] = $21
+            arr_size_exp[arrow_count] = $22 + 0
 
             if ($4 != "" && $5 != "" && $4 != $5 && !has_c) {
                 pair_count[$4 "\x1E" $5]++
@@ -931,7 +985,7 @@ __blocks__() {
             }
 
             target_dist_x = max_node_w + 48
-            if (target_dist_x < 130) target_dist_x = 130
+            if (target_dist_x < 100) target_dist_x = 100
             target_dist_y = max_node_h + 38
             if (target_dist_y < 76) target_dist_y = 76
 
@@ -952,6 +1006,7 @@ __blocks__() {
                 terms_y[nm] = py
                 terms_w[nm] = node_w[i]
                 terms_h[nm] = node_h[i]
+                terms_border[nm] = node_border[i]
 
                 bound_min_x = min(bound_min_x, px - node_w[i] / 2)
                 bound_max_x = max(bound_max_x, px + node_w[i] / 2)
@@ -1018,12 +1073,16 @@ __blocks__() {
                     l_style = arr_style[i]
                     a_color = arr_color[i]
                     a_size = arr_size[i]
+                    a_size_exp = arr_size_exp[i]
                     a_class = arr_class[i]
                     a_label_pos = arr_label_pos[i]
                     has_tex = arr_has_tex[i]
                     label_raw = arr_label_raw[i]
                     label_html = arr_label_html[i]
                     loop_dir = arr_loop_dir[i]
+
+                    src_no_border = (src in terms_border) && (terms_border[src] == "none" || terms_border[src] == "")
+                    tgt_no_border = (tgt in terms_border) && (terms_border[tgt] == "none" || terms_border[tgt] == "")
 
                     has_angle = (arr_angle_raw[i] != "")
                     a_angle = (has_angle ? arr_angle_raw[i] + 0 : 45)
@@ -1143,8 +1202,10 @@ __blocks__() {
                                 else dist_t = (abs_dy_t > 0 ? hh_t * L_t / abs_dy_t : 0)
                             }
 
-                            gap_s = dist_s + L_s * (1 - a_size) / 2
-                            gap_t = dist_t + L_t * (1 - a_size) / 2
+                            extra_s = (!a_size_exp && atype != "2-arrow" && src_no_border) ? 4 : L_s * (1 - a_size) / 2
+                            extra_t = (!a_size_exp && atype != "2-arrow" && tgt_no_border) ? 4 : L_t * (1 - a_size) / 2
+                            gap_s = dist_s + extra_s
+                            gap_t = dist_t + extra_t
                             if (gap_s > L_s - 2) gap_s = L_s - 2
                             if (gap_t > L_t - 2) gap_t = L_t - 2
 
@@ -1173,9 +1234,10 @@ __blocks__() {
                                 esx = sx + sign_dx * hw_s
                                 etx = tx - sign_dx * hw_t
                                 L_orth = abs(etx - esx)
-                                gap = L_orth * (1 - a_size) / 2
-                                nsx = esx + sign_dx * gap
-                                ntx = etx - sign_dx * gap
+                                gap_s = (!a_size_exp && atype != "2-arrow" && src_no_border) ? 4 : L_orth * (1 - a_size) / 2
+                                gap_t = (!a_size_exp && atype != "2-arrow" && tgt_no_border) ? 4 : L_orth * (1 - a_size) / 2
+                                nsx = esx + sign_dx * gap_s
+                                ntx = etx - sign_dx * gap_t
                                 nsy = sy; nty = ty
                                 d_path = sprintf("M %.1f %.1f L %.1f %.1f", nsx, sy, ntx, ty)
                                 tan_x = ntx - nsx; tan_y = 0
@@ -1183,9 +1245,10 @@ __blocks__() {
                                 esy = sy + sign_dy * hh_s
                                 ety = ty - sign_dy * hh_t
                                 L_orth = abs(ety - esy)
-                                gap = L_orth * (1 - a_size) / 2
-                                nsy = esy + sign_dy * gap
-                                nty = ety - sign_dy * gap
+                                gap_s = (!a_size_exp && atype != "2-arrow" && src_no_border) ? 4 : L_orth * (1 - a_size) / 2
+                                gap_t = (!a_size_exp && atype != "2-arrow" && tgt_no_border) ? 4 : L_orth * (1 - a_size) / 2
+                                nsy = esy + sign_dy * gap_s
+                                nty = ety - sign_dy * gap_t
                                 nsx = sx; ntx = tx
                                 d_path = sprintf("M %.1f %.1f L %.1f %.1f", sx, nsy, tx, nty)
                                 tan_x = 0; tan_y = nty - nsy
@@ -1195,11 +1258,12 @@ __blocks__() {
                                 abs_tx_esx = abs(tx - esx)
                                 abs_ety_sy = abs(ety - sy)
                                 L_orth = abs_tx_esx + abs_ety_sy
-                                gap = L_orth * (1 - a_size) / 2
-                                if (gap <= abs_tx_esx) { nsx = esx + sign_dx * gap; nsy = sy }
-                                else { nsx = tx; nsy = sy + sign_dy * (gap - abs_tx_esx) }
-                                if (gap <= abs_ety_sy) { ntx = tx; nty = ety - sign_dy * gap }
-                                else { ntx = tx - sign_dx * (gap - abs_ety_sy); nty = sy }
+                                gap_s = (!a_size_exp && atype != "2-arrow" && src_no_border) ? 4 : L_orth * (1 - a_size) / 2
+                                gap_t = (!a_size_exp && atype != "2-arrow" && tgt_no_border) ? 4 : L_orth * (1 - a_size) / 2
+                                if (gap_s <= abs_tx_esx) { nsx = esx + sign_dx * gap_s; nsy = sy }
+                                else { nsx = tx; nsy = sy + sign_dy * (gap_s - abs_tx_esx) }
+                                if (gap_t <= abs_ety_sy) { ntx = tx; nty = ety - sign_dy * gap_t }
+                                else { ntx = tx - sign_dx * (gap_t - abs_ety_sy); nty = sy }
 
                                 if (nsy == sy && ntx == tx) d_path = sprintf("M %.1f %.1f L %.1f %.1f L %.1f %.1f", nsx, nsy, tx, sy, ntx, nty)
                                 else if ((nsy != sy && ntx == tx) || (nsy == sy && ntx != tx)) d_path = sprintf("M %.1f %.1f L %.1f %.1f", nsx, nsy, ntx, nty)
@@ -1313,18 +1377,26 @@ __blocks__() {
                 raw_text = node_raw[i]
                 html_text = node_html[i]
 
-                rx = 18
-                if (border == "squared") rx = 4
-                if (border == "none" || border == "") rx = 0
+                is_borderless = (border == "none" || border == "")
+                has_custom_bg = (bg != "" && bg != "default" && bg != "none")
 
-                inline_style = ""
-                if (bg == "none") inline_style = inline_style "fill: none; "
-                else if (bg != "default" && bg != "") inline_style = inline_style "fill: " bg "; "
+                if (!is_borderless || has_custom_bg) {
+                    rx = 18
+                    if (border == "squared") rx = 4
+                    if (is_borderless) rx = 0
 
-                if (border == "none" || border == "") inline_style = inline_style "stroke: none; "
-                style_attr = (inline_style != "" ? " style=\"" inline_style "\"" : "")
+                    inline_style = ""
+                    if (bg == "none" || (is_borderless && !has_custom_bg)) {
+                        inline_style = inline_style "fill: none !important; "
+                    } else if (has_custom_bg) {
+                        inline_style = inline_style "fill: " bg " !important; "
+                    }
 
-                layer_nodes = layer_nodes "<rect x=\"" bx "\" y=\"" by "\" width=\"" w "\" height=\"" h "\" rx=\"" rx "\" class=\"" cp "-node" (n_class != "" ? " " n_class : "") "\" stroke-width=\"1.5\"" style_attr " />\n"
+                    if (is_borderless) inline_style = inline_style "stroke: none !important; border: none !important; "
+                    style_attr = (inline_style != "" ? " style=\"" inline_style "\"" : "")
+
+                    layer_nodes = layer_nodes "<rect x=\"" bx "\" y=\"" by "\" width=\"" w "\" height=\"" h "\" rx=\"" rx "\" class=\"" cp "-node" (n_class != "" ? " " n_class : "") "\" stroke-width=\"" (is_borderless ? "0" : "1.5") "\"" style_attr " />\n"
+                }
 
                 if (has_tex) {
                     gsub(/\\n/, "<br/>", html_text)
@@ -1382,7 +1454,8 @@ __blocks__() {
 
         content+="${diagram_svg}"$'\n'
         LIST_HTML_MAP["diagram"]+="<li><a href=\"#${diagram_id}\">Diagram ${page_diagram_count}</a></li>"$'\n'
-    }    
+    }   
+
 
     __block_plain() {
         local bname="$1"
